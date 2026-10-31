@@ -1,0 +1,10 @@
+{
+  "name": "VeeraGym – Smart Gym Membership & Maintenance Register",
+  "description": "Digital gym customer maintenance register, monthly payment records, membership status tracking, and automated renewal reminders.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
