@@ -1,19 +1,33 @@
 import fs from 'fs';
 import path from 'path';
-import { Customer, CustomerCategory, CustomerMonthOverride, DashboardStats, MonthRegisterRow, PaymentRecord, RenewalReminder } from '../src/types.ts';
+import { Customer, CustomerCategory, CustomerMonthOverride, DashboardStats, MonthRegisterRow, PaymentRecord, RenewalReminder, StoredPushSubscription } from '../src/types.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'gym_database.json');
-
+interface StoredFCMDevice {
+  token: string;
+  platform: string;
+  userAgent?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 interface DatabaseSchema {
   customers: Customer[];
   payments: PaymentRecord[];
   monthOverrides: CustomerMonthOverride[];
   reminders: RenewalReminder[];
+
   settings: {
     gymName: string;
     lastAutoCheck: string;
+    vapidKeys?: {
+      publicKey: string;
+      privateKey: string;
+    };
   };
+  pushSubscriptions?: StoredPushSubscription[];
+  fcmDevices?: StoredFCMDevice[];
+  sentRenewalNotifications?: string[];
 }
 
 const MONTH_NAMES = [
@@ -47,6 +61,16 @@ export function subtractDays(dateStr: string, days: number): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Calculate difference in days (dateStrB - dateStrA)
+export function daysBetween(dateStrA: string, dateStrB: string): number {
+  const [y1, m1, d1] = dateStrA.split('-').map(Number);
+  const [y2, m2, d2] = dateStrB.split('-').map(Number);
+  const utc1 = Date.UTC(y1, m1 - 1, d1);
+  const utc2 = Date.UTC(y2, m2 - 1, d2);
+  const msPerDay = 1000 * 60 * 60 * 24;
+  return Math.round((utc2 - utc1) / msPerDay);
+}
+
 // Format date to YYYY-MM-DD in UTC / local
 export function getTodayDateString(): string {
   const now = new Date();
@@ -66,6 +90,8 @@ class Database {
       gymName: 'VeeraGym',
       lastAutoCheck: new Date().toISOString(),
     },
+    pushSubscriptions: [],
+    fcmDevices: [],
   };
 
   constructor() {
@@ -84,13 +110,25 @@ class Database {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         this.data = JSON.parse(raw);
+        if (!Array.isArray(this.data.customers)) this.data.customers = [];
+        if (!Array.isArray(this.data.payments)) this.data.payments = [];
+        if (!Array.isArray(this.data.monthOverrides)) this.data.monthOverrides = [];
+        if (!Array.isArray(this.data.reminders)) this.data.reminders = [];
+        if (!Array.isArray(this.data.pushSubscriptions)) this.data.pushSubscriptions = [];
+        if (!Array.isArray(this.data.fcmDevices)) this.data.fcmDevices = [];
+        if (!Array.isArray(this.data.sentRenewalNotifications)) {
+  this.data.sentRenewalNotifications = [];
+}
+        if (!this.data.settings) {
+          this.data.settings = { gymName: 'VeeraGym', lastAutoCheck: new Date().toISOString() };
+        }
       } else {
-        this.seedInitialData();
+        this.initEmptyData();
         this.save();
       }
     } catch (err) {
       console.error('Error reading database, creating new state:', err);
-      this.seedInitialData();
+      this.initEmptyData();
       this.save();
     }
   }
@@ -106,176 +144,23 @@ class Database {
     }
   }
 
-  private seedInitialData() {
-    const today = '2026-10-31';
-
-    const customers: Customer[] = [
-      {
-        id: 'VG-1001',
-        name: 'Rahul Kumar',
-        phone: '9876543210',
-        weightKg: 72,
-        category: 'non-cardio',
-        monthlyFee: 600,
-        status: 'active',
-        joiningDate: '2026-05-15',
-        lastPaymentDate: '2026-10-15',
-        nextRenewalDate: '2026-11-15',
-        notes: 'Regular morning strength training',
-        createdAt: '2026-05-15T08:00:00.000Z',
-        updatedAt: '2026-10-15T09:30:00.000Z',
-      },
-      {
-        id: 'VG-1002',
-        name: 'Vikram Rathore',
-        phone: '9845012345',
-        weightKg: 84,
-        category: 'cardio',
-        monthlyFee: 1000,
-        status: 'active',
-        joiningDate: '2026-02-10',
-        lastPaymentDate: '2026-10-10',
-        nextRenewalDate: '2026-11-10',
-        notes: 'Cardio + functional fitness package',
-        createdAt: '2026-02-10T07:30:00.000Z',
-        updatedAt: '2026-10-10T08:15:00.000Z',
-      },
-      {
-        id: 'VG-1003',
-        name: 'Priya Sharma',
-        phone: '9711234567',
-        weightKg: 58,
-        category: 'non-cardio',
-        monthlyFee: 600,
-        status: 'active',
-        joiningDate: '2026-06-01',
-        lastPaymentDate: '2026-09-01',
-        nextRenewalDate: '2026-10-01', // Past due!
-        notes: 'Weight management and core conditioning',
-        createdAt: '2026-06-01T09:00:00.000Z',
-        updatedAt: '2026-09-01T10:00:00.000Z',
-      },
-      {
-        id: 'VG-1004',
-        name: 'Ananya Deshmukh',
-        phone: '9822334455',
-        weightKg: 62,
-        category: 'cardio',
-        monthlyFee: 1000,
-        status: 'active',
-        joiningDate: '2026-08-02',
-        lastPaymentDate: '2026-10-02',
-        nextRenewalDate: '2026-11-02', // Reminder is 2026-10-31 (Due Today!)
-        notes: 'High intensity treadmill & cycling program',
-        createdAt: '2026-08-02T11:00:00.000Z',
-        updatedAt: '2026-10-02T12:00:00.000Z',
-      },
-      {
-        id: 'VG-1005',
-        name: 'Suresh Reddy',
-        phone: '9944556677',
-        weightKg: 79,
-        category: 'non-cardio',
-        monthlyFee: 600,
-        status: 'active',
-        joiningDate: '2026-01-20',
-        lastPaymentDate: '2026-09-20',
-        nextRenewalDate: '2026-10-20', // Overdue!
-        notes: 'Free weights focus',
-        createdAt: '2026-01-20T08:30:00.000Z',
-        updatedAt: '2026-09-20T09:00:00.000Z',
-      },
-      {
-        id: 'VG-1006',
-        name: 'Karthik Nair',
-        phone: '9888776655',
-        weightKg: 75,
-        category: 'cardio',
-        monthlyFee: 1000,
-        status: 'active',
-        joiningDate: '2026-07-18',
-        lastPaymentDate: '2026-10-18',
-        nextRenewalDate: '2026-11-18',
-        notes: 'Cross-trainer and weight resistance',
-        createdAt: '2026-07-18T17:00:00.000Z',
-        updatedAt: '2026-10-18T18:00:00.000Z',
-      },
-      {
-        id: 'VG-1007',
-        name: 'Deepak Varma',
-        phone: '9765432109',
-        weightKg: 68,
-        category: 'non-cardio',
-        monthlyFee: 600,
-        status: 'inactive', // Inactive member
-        joiningDate: '2025-11-10',
-        lastPaymentDate: '2026-08-10',
-        nextRenewalDate: '2026-09-10',
-        notes: 'On temporary work travel',
-        createdAt: '2025-11-10T10:00:00.000Z',
-        updatedAt: '2026-09-12T14:00:00.000Z',
-      },
-      {
-        id: 'VG-1008',
-        name: 'Rohan Mehta',
-        phone: '9833445566',
-        weightKg: 88,
-        category: 'cardio',
-        monthlyFee: 1000,
-        status: 'active',
-        joiningDate: '2026-03-05',
-        lastPaymentDate: '2026-10-05',
-        nextRenewalDate: '2026-11-05',
-        notes: 'Cardio endurance and barbell training',
-        createdAt: '2026-03-05T06:30:00.000Z',
-        updatedAt: '2026-10-05T07:15:00.000Z',
-      },
-    ];
-
-    const payments: PaymentRecord[] = [
-      // Rahul Kumar (non-cardio ₹600)
-      { id: 'PAY-1001', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-05-15', paymentPeriod: 'May 2026', month: 5, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-05-15T08:00:00.000Z' },
-      { id: 'PAY-1002', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-06-15', paymentPeriod: 'June 2026', month: 6, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-06-15T08:00:00.000Z' },
-      { id: 'PAY-1003', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-07-15', paymentPeriod: 'July 2026', month: 7, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-07-15T08:00:00.000Z' },
-      { id: 'PAY-1004', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-08-15', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-08-15T08:00:00.000Z' },
-      { id: 'PAY-1005', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-09-15', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-09-15T08:00:00.000Z' },
-      { id: 'PAY-1006', customerId: 'VG-1001', customerName: 'Rahul Kumar', category: 'non-cardio', amount: 600, paymentDate: '2026-10-15', paymentPeriod: 'October 2026', month: 10, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-10-15T09:30:00.000Z' },
-
-      // Vikram Rathore (cardio ₹1000)
-      { id: 'PAY-1007', customerId: 'VG-1002', customerName: 'Vikram Rathore', category: 'cardio', amount: 1000, paymentDate: '2026-08-10', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'Card', status: 'Completed', createdAt: '2026-08-10T08:00:00.000Z' },
-      { id: 'PAY-1008', customerId: 'VG-1002', customerName: 'Vikram Rathore', category: 'cardio', amount: 1000, paymentDate: '2026-09-10', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-09-10T08:00:00.000Z' },
-      { id: 'PAY-1009', customerId: 'VG-1002', customerName: 'Vikram Rathore', category: 'cardio', amount: 1000, paymentDate: '2026-10-10', paymentPeriod: 'October 2026', month: 10, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-10-10T08:15:00.000Z' },
-
-      // Priya Sharma (non-cardio ₹600) - Paid until Sept, Oct pending
-      { id: 'PAY-1010', customerId: 'VG-1003', customerName: 'Priya Sharma', category: 'non-cardio', amount: 600, paymentDate: '2026-08-01', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-08-01T09:00:00.000Z' },
-      { id: 'PAY-1011', customerId: 'VG-1003', customerName: 'Priya Sharma', category: 'non-cardio', amount: 600, paymentDate: '2026-09-01', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-09-01T10:00:00.000Z' },
-
-      // Ananya Deshmukh (cardio ₹1000)
-      { id: 'PAY-1012', customerId: 'VG-1004', customerName: 'Ananya Deshmukh', category: 'cardio', amount: 1000, paymentDate: '2026-08-02', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-08-02T11:00:00.000Z' },
-      { id: 'PAY-1013', customerId: 'VG-1004', customerName: 'Ananya Deshmukh', category: 'cardio', amount: 1000, paymentDate: '2026-09-02', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-09-02T11:00:00.000Z' },
-      { id: 'PAY-1014', customerId: 'VG-1004', customerName: 'Ananya Deshmukh', category: 'cardio', amount: 1000, paymentDate: '2026-10-02', paymentPeriod: 'October 2026', month: 10, year: 2026, paymentMethod: 'Card', status: 'Completed', createdAt: '2026-10-02T12:00:00.000Z' },
-
-      // Suresh Reddy (non-cardio ₹600)
-      { id: 'PAY-1015', customerId: 'VG-1005', customerName: 'Suresh Reddy', category: 'non-cardio', amount: 600, paymentDate: '2026-08-20', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-08-20T08:30:00.000Z' },
-      { id: 'PAY-1016', customerId: 'VG-1005', customerName: 'Suresh Reddy', category: 'non-cardio', amount: 600, paymentDate: '2026-09-20', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-09-20T09:00:00.000Z' },
-
-      // Karthik Nair (cardio ₹1000)
-      { id: 'PAY-1017', customerId: 'VG-1006', customerName: 'Karthik Nair', category: 'cardio', amount: 1000, paymentDate: '2026-09-18', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-09-18T17:00:00.000Z' },
-      { id: 'PAY-1018', customerId: 'VG-1006', customerName: 'Karthik Nair', category: 'cardio', amount: 1000, paymentDate: '2026-10-18', paymentPeriod: 'October 2026', month: 10, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-10-18T18:00:00.000Z' },
-
-      // Deepak Varma (non-cardio ₹600)
-      { id: 'PAY-1019', customerId: 'VG-1007', customerName: 'Deepak Varma', category: 'non-cardio', amount: 600, paymentDate: '2026-07-10', paymentPeriod: 'July 2026', month: 7, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-07-10T10:00:00.000Z' },
-      { id: 'PAY-1020', customerId: 'VG-1007', customerName: 'Deepak Varma', category: 'non-cardio', amount: 600, paymentDate: '2026-08-10', paymentPeriod: 'August 2026', month: 8, year: 2026, paymentMethod: 'Cash', status: 'Completed', createdAt: '2026-08-10T10:00:00.000Z' },
-
-      // Rohan Mehta (cardio ₹1000)
-      { id: 'PAY-1021', customerId: 'VG-1008', customerName: 'Rohan Mehta', category: 'cardio', amount: 1000, paymentDate: '2026-09-05', paymentPeriod: 'September 2026', month: 9, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-09-05T06:30:00.000Z' },
-      { id: 'PAY-1022', customerId: 'VG-1008', customerName: 'Rohan Mehta', category: 'cardio', amount: 1000, paymentDate: '2026-10-05', paymentPeriod: 'October 2026', month: 10, year: 2026, paymentMethod: 'UPI / GPay / PhonePe', status: 'Completed', createdAt: '2026-10-05T07:15:00.000Z' },
-    ];
-
-    this.data.customers = customers;
-    this.data.payments = payments;
+  private initEmptyData() {
+    this.data.customers = [];
+    this.data.payments = [];
     this.data.monthOverrides = [];
-    this.refreshRemindersInternal();
+    this.data.reminders = [];
+    this.data.pushSubscriptions = [];
+this.data.fcmDevices = [];
+this.data.sentRenewalNotifications = [];
+    this.data.settings = {
+      gymName: 'VeeraGym',
+      lastAutoCheck: new Date().toISOString(),
+    };
+  }
+
+  public resetAllData() {
+    this.initEmptyData();
+    this.save();
   }
 
   public getCustomers(category?: CustomerCategory, status?: string, search?: string): Customer[] {
@@ -296,6 +181,23 @@ class Database {
   public getCustomerById(id: string): Customer | undefined {
     return this.data.customers.find((c) => c.id === id);
   }
+  public hasSentRenewalNotification(customerId: string, renewalDate: string): boolean {
+  const key = `${customerId}_${renewalDate}`;
+  return (this.data.sentRenewalNotifications || []).includes(key);
+}
+
+public markRenewalNotificationSent(customerId: string, renewalDate: string): void {
+  if (!Array.isArray(this.data.sentRenewalNotifications)) {
+    this.data.sentRenewalNotifications = [];
+  }
+
+  const key = `${customerId}_${renewalDate}`;
+
+  if (!this.data.sentRenewalNotifications.includes(key)) {
+    this.data.sentRenewalNotifications.push(key);
+    this.save();
+  }
+}
 
   public createCustomer(input: {
     name: string;
@@ -703,6 +605,140 @@ class Database {
       pendingCustomers,
       monthlyRevenue,
     };
+  }
+
+  // Push Subscription Management
+  public getPushSubscriptions(): StoredPushSubscription[] {
+    return this.data.pushSubscriptions || [];
+  }
+
+  public savePushSubscription(sub: StoredPushSubscription): void {
+    if (!Array.isArray(this.data.pushSubscriptions)) {
+      this.data.pushSubscriptions = [];
+    }
+    const idx = this.data.pushSubscriptions.findIndex((s) => s.endpoint === sub.endpoint);
+    if (idx >= 0) {
+      this.data.pushSubscriptions[idx] = sub;
+    } else {
+      this.data.pushSubscriptions.push(sub);
+    }
+    this.save();
+  }
+
+  public removePushSubscription(endpoint: string): void {
+    if (!Array.isArray(this.data.pushSubscriptions)) return;
+    this.data.pushSubscriptions = this.data.pushSubscriptions.filter((s) => s.endpoint !== endpoint);
+    this.save();
+  }
+// Firebase Cloud Messaging device management
+public getFCMDevices(): StoredFCMDevice[] {
+  return this.data.fcmDevices || [];
+}
+
+public saveFCMDevice(device: StoredFCMDevice): void {
+  if (!Array.isArray(this.data.fcmDevices)) {
+    this.data.fcmDevices = [];
+  }
+
+  const index = this.data.fcmDevices.findIndex(
+    (item) => item.token === device.token
+  );
+
+  if (index >= 0) {
+    this.data.fcmDevices[index] = {
+      ...this.data.fcmDevices[index],
+      ...device,
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
+    this.data.fcmDevices.push(device);
+  }
+
+  this.save();
+}
+
+public removeFCMDevice(token: string): void {
+  if (!Array.isArray(this.data.fcmDevices)) return;
+
+  this.data.fcmDevices = this.data.fcmDevices.filter(
+    (device) => device.token !== token
+  );
+
+  this.save();
+}
+  public getVapidKeys(): { publicKey: string; privateKey: string } | undefined {
+    return this.data.settings?.vapidKeys;
+  }
+
+  public setVapidKeys(keys: { publicKey: string; privateKey: string }): void {
+    if (!this.data.settings) {
+      this.data.settings = { gymName: 'VeeraGym', lastAutoCheck: new Date().toISOString() };
+    }
+    this.data.settings.vapidKeys = keys;
+    this.save();
+  }
+
+  // Get upcoming renewal candidates for background push notification (span of 2 days before)
+  public getUpcomingRenewalsForNotification(maxDaysAhead: number = 2) {
+    const today = getTodayDateString();
+    this.refreshRemindersInternal();
+
+    // Active customers with enabled reminders due within maxDaysAhead days
+    const results: Array<{
+      customerId: string;
+      customerName: string;
+      phone: string;
+      category: CustomerCategory;
+      amountDue: number;
+      renewalDate: string;
+      daysRemaining: number;
+      daysText: string;
+      status: string;
+    }> = [];
+
+    const activeCustomers = this.data.customers.filter((c) => c.status === 'active');
+
+    for (const customer of activeCustomers) {
+      const renewalDate = customer.nextRenewalDate;
+      const days = daysBetween(today, renewalDate);
+
+      // Check if already paid for the renewal period
+      const [rY, rM] = renewalDate.split('-').map(Number);
+      const hasPaid = this.data.payments.some(
+        (p) => p.customerId === customer.id && p.year === rY && p.month === rM
+      );
+
+      if (hasPaid) continue;
+      // Skip renewal notifications that have already been sent
+if (this.hasSentRenewalNotification(customer.id, renewalDate)) {
+  continue;
+}
+
+      // Span of 2 days before renewal: days <= 2
+      // If days > 2, it's not time yet for the 2-day reminder
+      if (days <= maxDaysAhead) {
+        let daysText = `${days} days`;
+        if (days === 0) daysText = 'Today';
+        else if (days === 1) daysText = '1 day';
+        else if (days < 0) daysText = `${Math.abs(days)} days overdue`;
+
+        results.push({
+          customerId: customer.id,
+          customerName: customer.name,
+          phone: customer.phone,
+          category: customer.category,
+          amountDue: customer.monthlyFee,
+          renewalDate,
+          daysRemaining: days,
+          daysText,
+          status: days < 0 ? 'Pending / Overdue' : (days <= 2 ? 'Due Today' : 'Upcoming'),
+        });
+      }
+    }
+
+    // Sort by most urgent (lowest days remaining first)
+    results.sort((a, b) => a.daysRemaining - b.daysRemaining);
+    return results;
   }
 }
 

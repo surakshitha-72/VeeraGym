@@ -1,29 +1,70 @@
-import { Customer, CustomerCategory, DashboardStats, MonthRegisterRow, PaymentRecord, RenewalReminder } from '../types.ts';
 
+import {
+  Customer,
+  CustomerCategory,
+  DashboardStats,
+  MonthRegisterRow,
+  PaymentRecord,
+  RenewalReminder
+} from '../types.ts';
+
+// Backend URL for local Android testing.
+// Keep the laptop and phone on the same Wi-Fi network.
+const API_BASE_URL = 'http://192.168.0.105:3000';
+
+// Common API request helper
+async function apiFetch(
+  path: string,
+  options?: RequestInit
+): Promise<Response> {
+  const url = `${API_BASE_URL}${path}`;
+
+  try {
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.error(
+        `API Error [${response.status}] ${url}:`,
+        errorText
+      );
+
+      throw new Error(
+        `Request failed (${response.status}): ${path}`
+      );
+    }
+
+    return response;
+  } catch (error) {
+    console.error(`Network/API request failed: ${url}`, error);
+    throw error;
+  }
+}
+
+// DASHBOARD
 export async function fetchDashboardStats(): Promise<DashboardStats> {
-  const res = await fetch('/api/dashboard/stats');
-  if (!res.ok) throw new Error('Failed to load dashboard stats');
+  const res = await apiFetch('/api/dashboard/stats');
   return res.json();
 }
 
+// CUSTOMERS
 export async function fetchCustomers(params?: {
   category?: CustomerCategory;
   status?: string;
   search?: string;
 }): Promise<Customer[]> {
   const query = new URLSearchParams();
+
   if (params?.category) query.append('category', params.category);
   if (params?.status) query.append('status', params.status);
   if (params?.search) query.append('search', params.search);
 
-  const res = await fetch(`/api/customers?${query.toString()}`);
-  if (!res.ok) throw new Error('Failed to load customers');
+  const res = await apiFetch(`/api/customers?${query.toString()}`);
   return res.json();
 }
 
 export async function fetchCustomer(id: string): Promise<Customer> {
-  const res = await fetch(`/api/customers/${id}`);
-  if (!res.ok) throw new Error('Failed to load customer profile');
+  const res = await apiFetch(`/api/customers/${encodeURIComponent(id)}`);
   return res.json();
 }
 
@@ -38,39 +79,43 @@ export async function createCustomer(data: {
   paymentMethod?: string;
   notes?: string;
 }): Promise<{ customer: Customer; payment?: PaymentRecord }> {
-  const res = await fetch('/api/customers', {
+  const res = await apiFetch('/api/customers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to create customer');
-  }
+
   return res.json();
 }
 
-export async function updateCustomer(id: string, data: Partial<Customer>): Promise<Customer> {
-  const res = await fetch(`/api/customers/${id}`, {
+export async function updateCustomer(
+  id: string,
+  data: Partial<Customer>
+): Promise<Customer> {
+  const res = await apiFetch(`/api/customers/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to update customer');
-  }
+
   return res.json();
 }
 
 export async function deleteCustomer(id: string): Promise<void> {
-  const res = await fetch(`/api/customers/${id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Failed to delete customer');
+  await apiFetch(`/api/customers/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }
 
-export async function fetchCustomerRegister(customerId: string, year: number): Promise<MonthRegisterRow[]> {
-  const res = await fetch(`/api/customers/${customerId}/register?year=${year}`);
-  if (!res.ok) throw new Error('Failed to load customer payment register');
+// CUSTOMER PAYMENT REGISTER
+export async function fetchCustomerRegister(
+  customerId: string,
+  year: number
+): Promise<MonthRegisterRow[]> {
+  const res = await apiFetch(
+    `/api/customers/${encodeURIComponent(customerId)}/register?year=${year}`
+  );
+
   return res.json();
 }
 
@@ -81,15 +126,24 @@ export async function updateMonthStatus(
   isActive: boolean,
   isInactive: boolean
 ): Promise<MonthRegisterRow[]> {
-  const res = await fetch(`/api/customers/${customerId}/register-status`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ year, monthIndex, isActive, isInactive }),
-  });
-  if (!res.ok) throw new Error('Failed to update month status');
+  const res = await apiFetch(
+    `/api/customers/${encodeURIComponent(customerId)}/register-status`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        year,
+        monthIndex,
+        isActive,
+        isInactive,
+      }),
+    }
+  );
+
   return res.json();
 }
 
+// PAYMENTS
 export async function fetchPayments(params?: {
   customerId?: string;
   category?: CustomerCategory;
@@ -98,14 +152,14 @@ export async function fetchPayments(params?: {
   search?: string;
 }): Promise<PaymentRecord[]> {
   const query = new URLSearchParams();
+
   if (params?.customerId) query.append('customerId', params.customerId);
   if (params?.category) query.append('category', params.category);
   if (params?.month) query.append('month', String(params.month));
   if (params?.year) query.append('year', String(params.year));
   if (params?.search) query.append('search', params.search);
 
-  const res = await fetch(`/api/payments?${query.toString()}`);
-  if (!res.ok) throw new Error('Failed to load payments');
+  const res = await apiFetch(`/api/payments?${query.toString()}`);
   return res.json();
 }
 
@@ -118,49 +172,103 @@ export async function recordPayment(data: {
   paymentMethod: string;
   notes?: string;
 }): Promise<{ payment: PaymentRecord; customer: Customer }> {
-  const res = await fetch('/api/payments', {
+  const res = await apiFetch('/api/payments', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to record payment');
-  }
+
   return res.json();
 }
 
+// RENEWAL REMINDERS
 export async function fetchReminders(): Promise<RenewalReminder[]> {
-  const res = await fetch('/api/reminders');
-  if (!res.ok) throw new Error('Failed to load renewal reminders');
+  const res = await apiFetch('/api/reminders');
   return res.json();
 }
 
-export async function updateReminder(id: string, updates: Partial<RenewalReminder>): Promise<RenewalReminder> {
-  const res = await fetch(`/api/reminders/${id}`, {
+export async function updateReminder(
+  id: string,
+  updates: Partial<RenewalReminder>
+): Promise<RenewalReminder> {
+  const res = await apiFetch(`/api/reminders/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
   });
-  if (!res.ok) throw new Error('Failed to update reminder');
+
   return res.json();
 }
 
 export async function notifyReminder(id: string): Promise<RenewalReminder> {
-  const res = await fetch(`/api/reminders/${id}/notify`, { method: 'POST' });
-  if (!res.ok) throw new Error('Failed to mark reminder sent');
+  const res = await apiFetch(
+    `/api/reminders/${encodeURIComponent(id)}/notify`,
+    { method: 'POST' }
+  );
+
   return res.json();
 }
 
-export async function parseVoiceTranscript(transcript: string): Promise<any> {
-  const res = await fetch('/api/parse-voice', {
+// VOICE TRANSCRIPT
+export async function parseVoiceTranscript(
+  transcript: string
+): Promise<any> {
+  const res = await apiFetch('/api/parse-voice', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ transcript }),
   });
+
+  return res.json();
+}
+
+// FIREBASE CLOUD MESSAGING - ANDROID DEVICE REGISTRATION
+export async function registerFCMDevice(
+  token: string
+): Promise<{ success: boolean; message: string }> {
+  const res = await apiFetch('/api/push/fcm/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token,
+      platform: 'android',
+      userAgent: navigator.userAgent,
+    }),
+  });
+
+  return res.json();
+}
+
+// SEND TEST NOTIFICATION THROUGH FIREBASE CLOUD MESSAGING
+export async function sendFCMTestNotification(): Promise<{
+  success: boolean;
+  sent?: number;
+  total?: number;
+}> {
+  const res = await apiFetch('/api/push/fcm/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  const data = await res.json();
+
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to extract customer data from speech');
+    throw new Error(
+      data.message || data.error || 'FCM test notification failed'
+    );
   }
+
+  return data;
+}
+// Unregister Android device from Firebase Cloud Messaging
+export async function unregisterFCMDevice(
+  token: string
+): Promise<{ success: boolean; message: string }> {
+  const res = await apiFetch('/api/push/fcm/unregister', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+
   return res.json();
 }

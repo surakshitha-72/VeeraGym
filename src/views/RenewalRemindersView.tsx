@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { BellRing, Calendar, Clock, AlertTriangle, CheckCircle2, MessageSquare, ToggleLeft, ToggleRight, UserX, IndianRupee, Send, ShieldAlert } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { BellRing, Calendar, Clock, AlertTriangle, CheckCircle2, MessageSquare, ToggleLeft, ToggleRight, UserX, IndianRupee, Send, ShieldAlert, Smartphone, Laptop, RefreshCw } from 'lucide-react';
 import { Customer, RenewalReminder } from '../types.ts';
 import { notifyReminder, updateReminder, updateCustomer } from '../services/api.ts';
 import { WhatsAppReminderTarget } from '../components/WhatsAppApprovalModal.tsx';
+import { getPushStatus, subscribeDeviceToPush, sendTestNotification, triggerRenewalCheckAndNotify, PushStatus } from '../services/pushNotifications.ts';
 
 interface Props {
   reminders: RenewalReminder[];
@@ -10,6 +11,8 @@ interface Props {
   onSelectCustomer: (customerId: string) => void;
   onQuickRecordPayment: (customerId: string) => void;
   onOpenWhatsAppApproval: (target: WhatsAppReminderTarget) => void;
+  targetCustomerId?: string | null;
+  onOpenPushModal?: () => void;
 }
 
 type TabType = 'due-today' | 'upcoming' | 'pending' | 'all';
@@ -20,9 +23,39 @@ export const RenewalRemindersView: React.FC<Props> = ({
   onSelectCustomer,
   onQuickRecordPayment,
   onOpenWhatsAppApproval,
+  targetCustomerId,
+  onOpenPushModal,
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('due-today');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [pushStatus, setPushStatus] = useState<PushStatus | null>(null);
+  const [pushActionMsg, setPushActionMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPushStatus().then(setPushStatus);
+  }, []);
+
+  // If opened with targetCustomerId (e.g. from background push notification click)
+  useEffect(() => {
+    if (targetCustomerId) {
+      // Find which tab this customer is in
+      const match = reminders.find((r) => r.customerId === targetCustomerId);
+      if (match) {
+        if (match.status === 'Due Today') setActiveTab('due-today');
+        else if (match.status === 'Upcoming') setActiveTab('upcoming');
+        else if (match.status === 'Pending / Overdue') setActiveTab('pending');
+        else setActiveTab('all');
+
+        // Scroll to highlighted row
+        setTimeout(() => {
+          const el = document.getElementById(`reminder-row-${targetCustomerId}`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 150);
+      }
+    }
+  }, [targetCustomerId, reminders]);
 
   const dueTodayList = reminders.filter((r) => r.status === 'Due Today');
   const upcomingList = reminders.filter((r) => r.status === 'Upcoming');
@@ -105,9 +138,102 @@ export const RenewalRemindersView: React.FC<Props> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => onOpenPushModal && onOpenPushModal()}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#181d24] hover:bg-[#202630] border border-neutral-700 text-xs text-neutral-200 transition-colors cursor-pointer"
+          >
+            <BellRing className={`w-3.5 h-3.5 ${pushStatus?.subscribed ? 'text-emerald-400' : 'text-amber-400'}`} />
+            <span>Outside-App Push: {pushStatus?.subscribed ? 'Active' : 'Configure'}</span>
+          </button>
           <span className="px-3 py-1 rounded-lg bg-neutral-800/80 border border-neutral-700 text-xs text-neutral-300 font-mono">
             {dueTodayList.length} Reminders Due Today
           </span>
+        </div>
+      </div>
+
+      {/* Outside-App Notification Banner */}
+      <div className="p-4 rounded-xl bg-gradient-to-r from-[#141922] via-[#161c26] to-[#141922] border border-neutral-800 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl bg-neutral-800 border border-neutral-700 shrink-0 text-white mt-0.5">
+            <Smartphone className="w-5 h-5 text-emerald-400" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-white tracking-tight">
+                Outside-App Push Notification System
+              </span>
+              {pushStatus?.subscribed ? (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  ● Device Subscribed
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-neutral-800 text-neutral-400 border border-neutral-700">
+                  Not Subscribed
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
+              When a renewal date is due in 2 days, your device receives a background popup even when VeeraGym is closed.
+              Clicking the popup opens the customer's draft approval entry directly.
+            </p>
+            {pushActionMsg && (
+              <p className="text-xs text-emerald-300 mt-1 font-mono">{pushActionMsg}</p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!pushStatus?.subscribed ? (
+            <button
+              onClick={async () => {
+                const res = await subscribeDeviceToPush();
+                setPushActionMsg(res.message);
+                const s = await getPushStatus();
+                setPushStatus(s);
+              }}
+              className="py-2 px-3.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold rounded-lg text-xs transition-colors flex items-center gap-1.5 shadow-md cursor-pointer"
+            >
+              <BellRing className="w-3.5 h-3.5" />
+              <span>Enable Device Push</span>
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={async () => {
+                  setPushActionMsg('Dispatching test outside-app notification...');
+                  const res = await sendTestNotification();
+                  setPushActionMsg(res.message);
+                }}
+                className="py-2 px-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
+                title="Send a sample push popup to your device"
+              >
+                <Send className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Send Test Popup</span>
+              </button>
+
+              <button
+                onClick={async () => {
+                  setPushActionMsg('Checking 2-day renewals and dispatching alerts...');
+                  const res = await triggerRenewalCheckAndNotify();
+                  setPushActionMsg(res.message);
+                  onRefresh();
+                }}
+                className="py-2 px-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
+                title="Evaluate and push upcoming renewal notifications"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                <span>Check & Dispatch</span>
+              </button>
+
+              <button
+                onClick={() => onOpenPushModal && onOpenPushModal()}
+                className="py-2 px-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white border border-neutral-700 rounded-lg text-xs transition-colors cursor-pointer"
+                title="Open notification settings"
+              >
+                Settings
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -202,21 +328,36 @@ export const RenewalRemindersView: React.FC<Props> = ({
                 {currentList.map((rem) => {
                   const isDueToday = rem.status === 'Due Today';
                   const isOverdue = rem.status === 'Pending / Overdue';
+                  const isTarget = targetCustomerId === rem.customerId;
 
                   return (
                     <tr
+                      id={`reminder-row-${rem.customerId}`}
                       key={rem.id}
                       className={`hover:bg-neutral-800/40 transition-colors ${
-                        isDueToday ? 'bg-amber-950/10' : isOverdue ? 'bg-red-950/10' : ''
+                        isTarget
+                          ? 'ring-2 ring-emerald-500 bg-emerald-950/30 shadow-lg'
+                          : isDueToday
+                          ? 'bg-amber-950/10'
+                          : isOverdue
+                          ? 'bg-red-950/10'
+                          : ''
                       }`}
                     >
                       <td className="py-3.5 px-4 font-bold text-white">
-                        <button
-                          onClick={() => onSelectCustomer(rem.customerId)}
-                          className="hover:underline text-left cursor-pointer"
-                        >
-                          {rem.customerName}
-                        </button>
+                        <div className="flex items-center flex-wrap gap-1.5">
+                          <button
+                            onClick={() => onSelectCustomer(rem.customerId)}
+                            className="hover:underline text-left cursor-pointer"
+                          >
+                            {rem.customerName}
+                          </button>
+                          {isTarget && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                              Opened from Notification
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       <td className="py-3.5 px-4 font-mono text-neutral-300">

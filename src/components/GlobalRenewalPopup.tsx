@@ -39,10 +39,18 @@ export const GlobalRenewalPopup: React.FC<Props> = ({
 
   const fireDesktopNotification = (target: RenewalReminder) => {
     try {
-      const title = `VeeraGym: 2-Day Renewal Reminder for ${target.customerName}`;
+      let title = `VeeraGym: Renewal Reminder`;
+      let body = `VeeraGym: ${target.customerName}'s membership renewal is due in 2 days (${target.renewalDate}). Amount Due: ₹${target.amountDue}. Days Remaining: 2 days. Would you like to prepare a WhatsApp reminder?`;
+
+      if (activeAlerts.length > 1) {
+        title = `VeeraGym: ${activeAlerts.length} Pending WhatsApp Reminders`;
+        const totalDue = activeAlerts.reduce((sum, r) => sum + r.amountDue, 0);
+        body = `${activeAlerts.length} members have upcoming renewals. Total Amount Due: ₹${totalDue}. Tap to prepare WhatsApp reminders.`;
+      }
+
       const options = {
-        body: `Renewal date:${target.renewalDate},for your information and record. Mobile: ${target.phone}. Click to approve WhatsApp draft.`,
-        icon: '/favicon.ico',
+        body,
+        icon: '/icon-192.svg',
         tag: `renewal-${target.customerId}-${target.renewalDate}`,
       };
       const notification = new Notification(title, options);

@@ -1,0 +1,17 @@
+{
+  "name": "VeeraGym Management",
+  "short_name": "VeeraGym",
+  "description": "Smart Gym Membership & Maintenance Management System",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0f13",
+  "theme_color": "#12151b",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

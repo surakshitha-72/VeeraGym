@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capgo/capacitor-speech-recognition';
 import { UserPlus, Mic, CheckCircle, AlertCircle, IndianRupee, Sparkles, Scale, Phone, User, Calendar, CreditCard, FileText, Play, RefreshCw, Square } from 'lucide-react';
 import { CustomerCategory, PaymentMethod } from '../types.ts';
 import { createCustomer, parseVoiceTranscript } from '../services/api.ts';
@@ -40,6 +42,10 @@ export const AddCustomerView: React.FC<Props> = ({
   const inlineExplicitlyRecordingRef = useRef<boolean>(false);
   const accumulatedInlineTranscriptRef = useRef<string>('');
   const inlineTimerIntervalRef = useRef<any>(null);
+  const nativeListenerHandlesRef = useRef<any[]>([]);
+  const nativeRecordingRef = useRef<boolean>(false);
+  const nativeFinalTranscriptRef = useRef<string>('');
+  const nativePartialTranscriptRef = useRef<string>('');
 
   // Timer for inline recording
   useEffect(() => {
@@ -62,14 +68,22 @@ export const AddCustomerView: React.FC<Props> = ({
     };
   }, [inlineListening]);
 
-  // Clean up on unmount
+  // Clean up both browser and native speech recognition on unmount.
   useEffect(() => {
     return () => {
       inlineExplicitlyRecordingRef.current = false;
+      nativeRecordingRef.current = false;
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
         } catch (_) {}
+      }
+      nativeListenerHandlesRef.current.forEach((handle) => {
+        try { handle.remove(); } catch (_) {}
+      });
+      nativeListenerHandlesRef.current = [];
+      if (Capacitor.isNativePlatform()) {
+        SpeechRecognition.stop().catch(() => {});
       }
     };
   }, []);
@@ -105,17 +119,102 @@ export const AddCustomerView: React.FC<Props> = ({
     setAmountPaid(newCat === 'cardio' ? 1000 : 600);
   };
 
-  // Continuous speech recognition engine that only stops when user clicks Stop
+  // Native Android speech recognition is used inside the installed app.
+  // Browser SpeechRecognition remains as a fallback for web preview.
+  const updateNativeTranscript = (matches?: string[]) => {
+    const phrase = (matches || []).find((item) => item && item.trim())?.trim();
+    if (!phrase) return;
+    nativePartialTranscriptRef.current = phrase;
+    const full = [nativeFinalTranscriptRef.current, phrase].filter(Boolean).join(' ').trim();
+    setInlineTranscript(full);
+  };
+
+  const removeNativeListeners = async () => {
+    const handles = nativeListenerHandlesRef.current;
+    nativeListenerHandlesRef.current = [];
+    for (const handle of handles) {
+      try {
+        await handle.remove();
+      } catch (_) {}
+    }
+  };
+
+  const startNativeInlineSpeech = async () => {
+    try {
+      const permission = await SpeechRecognition.requestPermissions();
+      const microphonePermission = (permission as any)?.speechRecognition;
+      if (microphonePermission === 'denied') {
+        setError('Microphone permission was denied. Open Android Settings → Apps → VeeraGym → Permissions and allow Microphone.');
+        return;
+      }
+
+      const availability = await SpeechRecognition.available();
+      if (!(availability as any)?.available) {
+        setError('Speech recognition is not available on this device. Please use the Full Voice Dialog or enter details manually.');
+        return;
+      }
+
+      await removeNativeListeners();
+      nativeFinalTranscriptRef.current = inlineTranscript.trim();
+      nativePartialTranscriptRef.current = '';
+      accumulatedInlineTranscriptRef.current = inlineTranscript.trim();
+
+      const partialHandle = await SpeechRecognition.addListener('partialResults', (event: any) => {
+        updateNativeTranscript(event?.matches);
+      });
+      nativeListenerHandlesRef.current.push(partialHandle);
+
+      const segmentHandle = await SpeechRecognition.addListener('segmentResults', (event: any) => {
+        const phrase = (event?.matches || []).find((item: string) => item && item.trim())?.trim();
+        if (phrase) {
+          nativeFinalTranscriptRef.current = [
+            nativeFinalTranscriptRef.current,
+            phrase,
+          ].filter(Boolean).join(' ').trim();
+          nativePartialTranscriptRef.current = '';
+          setInlineTranscript(nativeFinalTranscriptRef.current);
+        }
+      });
+      nativeListenerHandlesRef.current.push(segmentHandle);
+
+      const errorHandle = await SpeechRecognition.addListener('error', (event: any) => {
+        console.warn('Native inline speech error:', event);
+        nativeRecordingRef.current = false;
+        inlineExplicitlyRecordingRef.current = false;
+        setInlineListening(false);
+        setError(event?.message || event?.error || 'Speech recognition stopped. Please try again.');
+      });
+      nativeListenerHandlesRef.current.push(errorHandle);
+
+      nativeRecordingRef.current = true;
+      inlineExplicitlyRecordingRef.current = true;
+      setInlineListening(true);
+      setError(null);
+
+      await SpeechRecognition.start({
+        language: 'en-IN',
+        maxResults: 5,
+        partialResults: true,
+        popup: false,
+      });
+    } catch (err: any) {
+      nativeRecordingRef.current = false;
+      inlineExplicitlyRecordingRef.current = false;
+      setInlineListening(false);
+      console.error('Native inline speech start error:', err);
+      setError(err?.message || 'Could not start microphone. Check VeeraGym microphone permission in Android Settings.');
+      await removeNativeListeners();
+    }
+  };
+
   const createInlineRecognition = () => {
-    const SpeechRecognition =
+    const BrowserSpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) {
-      return null;
-    }
+    if (!BrowserSpeechRecognition) return null;
 
     try {
-      const recognition = new SpeechRecognition();
+      const recognition = new BrowserSpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-IN';
@@ -128,60 +227,47 @@ export const AddCustomerView: React.FC<Props> = ({
       recognition.onresult = (event: any) => {
         let interim = '';
         let finals = '';
-
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const item = event.results[i];
-          if (item.isFinal) {
-            finals += item[0].transcript + ' ';
-          } else {
-            interim += item[0].transcript;
-          }
+          if (item.isFinal) finals += item[0].transcript + ' ';
+          else interim += item[0].transcript;
         }
-
         if (finals.trim()) {
           accumulatedInlineTranscriptRef.current +=
             (accumulatedInlineTranscriptRef.current ? ' ' : '') + finals.trim();
         }
-
         const full = (
           accumulatedInlineTranscriptRef.current + (interim ? ' ' + interim : '')
         ).trim();
-
-        if (full) {
-          setInlineTranscript(full);
-        }
+        if (full) setInlineTranscript(full);
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('Inline mic notice:', event.error);
+        console.warn('Inline browser mic notice:', event.error);
         if (event.error === 'not-allowed') {
           inlineExplicitlyRecordingRef.current = false;
           setInlineListening(false);
-          setError('Microphone permission blocked. Please allow microphone in browser or type details.');
+          setError('Microphone permission blocked. Please allow microphone permission in your browser or Android settings.');
         }
       };
 
-      // Restart automatically if browser prematurely ends session while user is still recording!
       recognition.onend = () => {
         if (inlineExplicitlyRecordingRef.current) {
           try {
             recognition.start();
           } catch (_) {
-            setTimeout(() => {
+            window.setTimeout(() => {
               if (inlineExplicitlyRecordingRef.current) {
-                try {
-                  recognition.start();
-                } catch (e) {
-                  console.warn('Inline auto-restart retry error:', e);
+                try { recognition.start(); } catch (e) {
+                  console.warn('Inline browser auto-restart error:', e);
                 }
               }
-            }, 100);
+            }, 250);
           }
         } else {
           setInlineListening(false);
         }
       };
-
       return recognition;
     } catch (e) {
       console.error('Speech recognition creation error:', e);
@@ -192,33 +278,40 @@ export const AddCustomerView: React.FC<Props> = ({
   const startInlineSpeech = async () => {
     setError(null);
     setVoiceNotice(null);
-    accumulatedInlineTranscriptRef.current = inlineTranscript.trim();
 
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => {});
-      }
-    } catch (_) {}
-
-    const recognition = createInlineRecognition();
-    if (!recognition) {
-      setError('Speech recognition is not supported in this browser. Please type into the voice box or click a sample.');
+    if (Capacitor.isNativePlatform()) {
+      await startNativeInlineSpeech();
       return;
     }
 
+    accumulatedInlineTranscriptRef.current = inlineTranscript.trim();
+    const recognition = createInlineRecognition();
+    if (!recognition) {
+      setError('Speech recognition is not supported in this browser. Please use the Full Voice Dialog or type customer details.');
+      return;
+    }
     recognitionRef.current = recognition;
     inlineExplicitlyRecordingRef.current = true;
-
     try {
       recognition.start();
     } catch (err: any) {
-      console.warn('Inline recognition error:', err);
-      setInlineListening(true);
+      console.warn('Inline browser recognition error:', err);
+      inlineExplicitlyRecordingRef.current = false;
+      setInlineListening(false);
+      setError(err?.message || 'Could not start speech recognition.');
     }
   };
 
   const stopInlineSpeech = () => {
     inlineExplicitlyRecordingRef.current = false;
+    if (Capacitor.isNativePlatform()) {
+      nativeRecordingRef.current = false;
+      SpeechRecognition.stop().catch((err: any) => {
+        console.warn('Native inline speech stop error:', err);
+      });
+      setInlineListening(false);
+      return;
+    }
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -389,41 +482,15 @@ export const AddCustomerView: React.FC<Props> = ({
                 setInlineTranscript(e.target.value);
                 accumulatedInlineTranscriptRef.current = e.target.value;
               }}
-              placeholder='Spoken words will continuously accumulate here until you click Stop... (e.g. "Add Rahul Kumar, weight 72 kilograms, mobile number 9876543210, non-cardio membership, paid 600 rupees on 15th October 2026.")'
+              placeholder='Spoken words will continuously accumulate here until you click Stop... (Speak customer name, mobile number, weight, cardio or non-cardio, and payment details)'
               className="w-full bg-[#12151b] border border-neutral-700/80 rounded-xl p-3 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-emerald-500 font-sans leading-relaxed"
             />
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* Quick Test Samples */}
-            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-              <span className="text-neutral-400 font-semibold mr-1">Quick Test Prompts:</span>
-              <button
-                type="button"
-                onClick={() => {
-                  stopInlineSpeech();
-                  const s = 'Add Rahul Kumar, weight 72 kilograms, mobile number 9876543210, non-cardio membership, paid 600 rupees on 15th October 2026.';
-                  accumulatedInlineTranscriptRef.current = s;
-                  setInlineTranscript(s);
-                  handleParseAndPopulate(s);
-                }}
-                className="py-1 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-300 hover:text-white transition-colors cursor-pointer"
-              >
-                + Rahul Kumar (Non-Cardio ₹600)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  stopInlineSpeech();
-                  const s = 'Register Priya Sharma, weight 58 kg, phone 9711234567, cardio membership 1000 rupees paid via UPI on 25th October 2026.';
-                  accumulatedInlineTranscriptRef.current = s;
-                  setInlineTranscript(s);
-                  handleParseAndPopulate(s);
-                }}
-                className="py-1 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-300 hover:text-white transition-colors cursor-pointer"
-              >
-                + Priya Sharma (Cardio ₹1,000)
-              </button>
+            {/* Guide Info */}
+            <div className="text-[11px] text-neutral-400">
+              <span className="text-emerald-400 font-medium">Continuous Dictation:</span> Speak naturally, then click Auto-Fill Form.
             </div>
 
             {/* Populate & Clear Buttons */}
@@ -496,7 +563,7 @@ export const AddCustomerView: React.FC<Props> = ({
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Rahul Kumar"
+                  placeholder="Enter member's full name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full bg-[#1e232b] border border-neutral-700 text-white placeholder-neutral-500 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-neutral-500"

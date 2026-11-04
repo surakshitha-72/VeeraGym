@@ -85,3 +85,39 @@ export interface DashboardStats {
   pendingCustomers: Customer[];
   monthlyRevenue: number;
 }
+
+export interface PushSubscriptionKeys {
+  p256dh: string;
+  auth: string;
+}
+
+export interface StoredPushSubscription {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: PushSubscriptionKeys;
+  userAgent?: string;
+  createdAt: string;
+}
+
+export interface PushNotificationPayload {
+  title: string;
+  body: string;
+  icon?: string;
+  badge?: string;
+  tag?: string;
+  data: {
+    url: string;
+    customerId?: string;
+    customerName?: string;
+    renewalDate?: string;
+    amountDue?: number;
+    daysRemaining?: number | string;
+    type?: 'single' | 'multiple' | 'test';
+    count?: number;
+    [key: string]: any;
+  };
+  actions?: Array<{
+    action: string;
+    title: string;
+  }>;
+}

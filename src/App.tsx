@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { BellRing, Smartphone } from 'lucide-react';
 import { Customer, CustomerCategory, DashboardStats, PaymentRecord, RenewalReminder } from './types.ts';
 import { fetchCustomers, fetchDashboardStats, fetchPayments, fetchReminders } from './services/api.ts';
 import { Navigation, NavItem } from './components/Navigation.tsx';
@@ -12,7 +13,7 @@ import { DashboardView } from './views/DashboardView.tsx';
 import { CategorySelectionView } from './views/CategorySelectionView.tsx';
 import { CustomerListView } from './views/CustomerListView.tsx';
 import { CustomerRegisterView } from './views/CustomerRegisterView.tsx';
-import { AddCustomerView } from './views/AddCustomerView.tsx';
+import { AddCustomerView } from './views/AddCustomerView';
 import { PaymentRecordsView } from './views/PaymentRecordsView.tsx';
 import { RenewalRemindersView } from './views/RenewalRemindersView.tsx';
 import { PaymentDetailsModal } from './components/PaymentDetailsModal.tsx';
@@ -21,6 +22,8 @@ import { EditCustomerModal } from './components/EditCustomerModal.tsx';
 import { VoiceRegistrationModal } from './components/VoiceRegistrationModal.tsx';
 import { WhatsAppApprovalModal, WhatsAppReminderTarget } from './components/WhatsAppApprovalModal.tsx';
 import { GlobalRenewalPopup } from './components/GlobalRenewalPopup.tsx';
+import { PushNotificationManagerModal } from './components/PushNotificationManagerModal.tsx';
+import { getPushStatus, registerServiceWorker, PushStatus } from './services/pushNotifications.ts';
 
 export default function App() {
   const [navItem, setNavItem] = useState<NavItem>('home');
@@ -29,6 +32,11 @@ export default function App() {
   // Customers sub-navigation state
   const [selectedCategory, setSelectedCategory] = useState<CustomerCategory | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+
+  // Push Notifications and Deep Link State
+  const [pushModalOpen, setPushModalOpen] = useState<boolean>(false);
+  const [pushStatus, setPushStatus] = useState<PushStatus | null>(null);
+  const [notificationTargetCustomerId, setNotificationTargetCustomerId] = useState<string | null>(null);
 
   // App data state
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -76,6 +84,71 @@ export default function App() {
   useEffect(() => {
     loadData();
   }, [dataRefreshTrigger]);
+
+  // Deep linking and Outside-App Notification handling
+  useEffect(() => {
+    registerServiceWorker().then(() => {
+      getPushStatus().then(setPushStatus);
+    });
+
+    const parseUrlParams = () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const view = params.get('view');
+        const customerId = params.get('customerId');
+        if (view === 'reminders') {
+          setNavItem('reminders');
+          if (customerId) {
+            setNotificationTargetCustomerId(customerId);
+          }
+        }
+      } catch (err) {
+        console.warn('URL parsing error:', err);
+      }
+    };
+
+    parseUrlParams();
+    window.addEventListener('popstate', parseUrlParams);
+
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'NAVIGATE_TO_REMINDER') {
+        setNavItem('reminders');
+        if (event.data.data?.customerId) {
+          setNotificationTargetCustomerId(event.data.data.customerId);
+        }
+      }
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
+
+    return () => {
+      window.removeEventListener('popstate', parseUrlParams);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
+    };
+  }, []);
+
+  // When deep-linked from an outside-app notification for a specific customer, auto-focus their reminder approval entry
+  useEffect(() => {
+    if (notificationTargetCustomerId && reminders.length > 0) {
+      const match = reminders.find((r) => r.customerId === notificationTargetCustomerId);
+      if (match) {
+        setWhatsAppTarget({
+          id: match.id,
+          customerId: match.customerId,
+          customerName: match.customerName,
+          phone: match.phone,
+          category: match.category,
+          amountDue: match.amountDue,
+          renewalDate: match.renewalDate,
+        });
+        setWhatsAppModalOpen(true);
+      }
+    }
+  }, [notificationTargetCustomerId, reminders]);
 
   const triggerRefresh = () => {
     setDataRefreshTrigger((prev) => prev + 1);
@@ -171,7 +244,17 @@ export default function App() {
             )}
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setPushModalOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#181d24] hover:bg-[#202732] border border-neutral-700/80 text-xs transition-colors cursor-pointer"
+              title="Manage outside-app device push notifications"
+            >
+              <BellRing className={`w-3.5 h-3.5 ${pushStatus?.subscribed ? 'text-emerald-400' : 'text-amber-400'}`} />
+              <span className="hidden sm:inline text-neutral-300 font-medium">Device Push</span>
+              <span className={`w-2 h-2 rounded-full ${pushStatus?.subscribed ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-500'}`} />
+            </button>
+
             <div className="hidden sm:flex items-center gap-2 text-xs text-neutral-400">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
               <span>Register Online</span>
@@ -324,6 +407,8 @@ export default function App() {
                 setWhatsAppTarget(target);
                 setWhatsAppModalOpen(true);
               }}
+              targetCustomerId={notificationTargetCustomerId}
+              onOpenPushModal={() => setPushModalOpen(true)}
             />
           )}
         </main>
@@ -392,6 +477,12 @@ export default function App() {
         isOpen={isVoiceModalOpen}
         onClose={() => setIsVoiceModalOpen(false)}
         onExtracted={handleVoiceExtracted}
+      />
+
+      <PushNotificationManagerModal
+        isOpen={pushModalOpen}
+        onClose={() => setPushModalOpen(false)}
+        onStatusChange={(status) => setPushStatus(status)}
       />
     </div>
   );

@@ -1,6 +1,18 @@
+
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Sparkles, AlertCircle, ArrowRight, X, Play, RefreshCw, Volume2, Square } from 'lucide-react';
+import {
+  Mic,
+  Sparkles,
+  AlertCircle,
+  ArrowRight,
+  X,
+  RefreshCw,
+  Volume2,
+  Square,
+} from 'lucide-react';
 import { parseVoiceTranscript } from '../services/api.ts';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capgo/capacitor-speech-recognition';
 
 interface ExtractedData {
   name: string;
@@ -21,228 +33,545 @@ interface Props {
   onExtracted: (data: ExtractedData) => void;
 }
 
+type ListenerHandle = {
+  remove: () => Promise<void>;
+};
+
 export const VoiceRegistrationModal: React.FC<Props> = ({
   isOpen,
   onClose,
   onExtracted,
 }) => {
-  if (!isOpen) return null;
-
-  const [isListening, setIsListening] = useState<boolean>(false);
-  const [transcript, setTranscript] = useState<string>('');
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
-  const [micStatusText, setMicStatusText] = useState<string>(
-    'Ready. Click "Start Recording" — it will keep recording continuously until you click Stop.'
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+
+  const [micStatusText, setMicStatusText] = useState(
+    'Ready. Click Start Recording to begin.'
   );
 
   const recognitionRef = useRef<any>(null);
-  const isExplicitlyRecordingRef = useRef<boolean>(false);
-  const accumulatedTranscriptRef = useRef<string>('');
-  const timerIntervalRef = useRef<any>(null);
+  const explicitlyRecordingRef = useRef(false);
+  const accumulatedTranscriptRef = useRef('');
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Timer effect while recording
-  useEffect(() => {
-    if (isListening) {
-      setRecordingSeconds(0);
-      timerIntervalRef.current = setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
+  const nativeListenersRef = useRef<ListenerHandle[]>([]);
+  const nativeRecordingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const isNative = Capacitor.isNativePlatform();
+
+  // Update transcript safely
+  const setTranscriptSafely = (value: string) => {
+    const clean = value.trim();
+
+    if (clean) {
+      accumulatedTranscriptRef.current = clean;
+      setTranscript(clean);
+    }
+  };
+
+  // Remove native speech listeners
+  const removeNativeListeners = async () => {
+    const handles = nativeListenersRef.current;
+    nativeListenersRef.current = [];
+
+    await Promise.all(
+      handles.map(async (handle) => {
+        try {
+          await handle.remove();
+        } catch (e) {
+          console.warn('Listener cleanup:', e);
+        }
+      })
+    );
+  };
+
+  // Stop native Android speech recognition
+  const stopNative = async () => {
+    nativeRecordingRef.current = false;
+
+    try {
+      await SpeechRecognition.stop();
+    } catch (e) {
+      console.warn('Speech stop notice:', e);
+
+      try {
+        await SpeechRecognition.forceStop();
+      } catch (forceError) {
+        console.warn('Speech force-stop notice:', forceError);
       }
     }
 
+    await removeNativeListeners();
+  };
+
+  // Stop recording
+  const stopListening = async () => {
+    explicitlyRecordingRef.current = false;
+
+    if (isNative) {
+      await stopNative();
+    } else if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        console.warn(e);
+      }
+
+      recognitionRef.current = null;
+    }
+
+    if (mountedRef.current) {
+      setIsListening(false);
+
+      setMicStatusText(
+        'Recording stopped. Review the transcript and click Extract & Populate Form.'
+      );
+    }
+  };
+
+  // Recording timer
+  useEffect(() => {
+    if (isListening) {
+      setRecordingSeconds(0);
+
+      timerRef.current = setInterval(() => {
+        setRecordingSeconds((n) => n + 1);
+      }, 1000);
+    } else if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
     return () => {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
       }
     };
   }, [isListening]);
 
-  // Clean up on unmount or close
+  // Component cleanup
   useEffect(() => {
+    mountedRef.current = true;
+
     return () => {
-      isExplicitlyRecordingRef.current = false;
+      mountedRef.current = false;
+      explicitlyRecordingRef.current = false;
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
         } catch (_) {}
       }
+
+      if (
+        nativeRecordingRef.current ||
+        nativeListenersRef.current.length
+      ) {
+        SpeechRecognition.stop().catch(() => {});
+
+        nativeListenersRef.current.forEach((handle) => {
+          handle.remove().catch(() => {});
+        });
+
+        nativeListenersRef.current = [];
+        nativeRecordingRef.current = false;
+      }
     };
   }, []);
 
-  const createRecognition = () => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  // Stop microphone when modal is closed by parent
+  useEffect(() => {
+    if (!isOpen && (isListening || nativeRecordingRef.current)) {
+      void stopListening();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
-    if (!SpeechRecognition) {
+  // Browser speech recognition fallback
+  const createBrowserRecognition = () => {
+    const BrowserRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!BrowserRecognition) {
       return null;
     }
 
     try {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true; // Request continuous speech
-      recognition.interimResults = true; // Real-time feedback
-      recognition.lang = 'en-IN'; // Indian English recognition
+      const recognition = new BrowserRecognition();
+
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-IN';
 
       recognition.onstart = () => {
         setIsListening(true);
-        setMicStatusText('🎙️ Recording actively. Speak freely — it will NOT stop until you click "Stop Recording".');
         setError(null);
+
+        setMicStatusText(
+          'Recording actively. Speak freely and click Stop when finished.'
+        );
       };
 
       recognition.onresult = (event: any) => {
         let interim = '';
-        let finals = '';
+        let finalText = '';
 
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
+        for (
+          let i = event.resultIndex;
+          i < event.results.length;
+          i += 1
+        ) {
           const item = event.results[i];
+
           if (item.isFinal) {
-            finals += item[0].transcript + ' ';
+            finalText += `${item[0].transcript} `;
           } else {
             interim += item[0].transcript;
           }
         }
 
-        if (finals.trim()) {
-          accumulatedTranscriptRef.current += (accumulatedTranscriptRef.current ? ' ' : '') + finals.trim();
+        if (finalText.trim()) {
+          accumulatedTranscriptRef.current = [
+            accumulatedTranscriptRef.current,
+            finalText.trim(),
+          ]
+            .filter(Boolean)
+            .join(' ');
         }
 
-        const currentFull = (accumulatedTranscriptRef.current + (interim ? ' ' + interim : '')).trim();
-        if (currentFull) {
-          setTranscript(currentFull);
+        const full = [
+          accumulatedTranscriptRef.current,
+          interim.trim(),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+
+        if (full) {
+          setTranscript(full);
         }
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('Speech recognition notice:', event.error);
-        if (event.error === 'not-allowed') {
-          isExplicitlyRecordingRef.current = false;
+        console.warn(
+          'Browser speech recognition:',
+          event.error
+        );
+
+        if (
+          event.error === 'not-allowed' ||
+          event.error === 'service-not-allowed'
+        ) {
+          explicitlyRecordingRef.current = false;
           setIsListening(false);
-          setError('Microphone permission denied. Please allow microphone access or use the sample prompts.');
+
+          setError(
+            'Microphone permission denied. Allow microphone access in browser settings and try again.'
+          );
         } else if (event.error === 'no-speech') {
-          // Do NOT stop recording when user is quiet/pausing!
-          setMicStatusText('Still recording... Speak customer details whenever you are ready.');
+          setMicStatusText(
+            'Still recording. Speak whenever you are ready.'
+          );
+        } else {
+          setError(
+            `Speech recognition error: ${event.error || 'Unknown error'}`
+          );
         }
       };
 
-      // CRITICAL: Prevent premature termination by browser timeouts
       recognition.onend = () => {
-        if (isExplicitlyRecordingRef.current) {
-          // The browser prematurely ended the stream due to silence or a pause,
-          // but the user HAS NOT clicked Stop! Automatically restart!
-          try {
-            recognition.start();
-          } catch (_) {
-            setTimeout(() => {
-              if (isExplicitlyRecordingRef.current) {
-                try {
-                  recognition.start();
-                } catch (e) {
-                  console.warn('Auto-restart retry error:', e);
-                }
+        if (explicitlyRecordingRef.current) {
+          window.setTimeout(() => {
+            if (explicitlyRecordingRef.current) {
+              try {
+                recognition.start();
+              } catch (e) {
+                console.warn('Browser speech restart:', e);
               }
-            }, 100);
-          }
+            }
+          }, 250);
         } else {
           setIsListening(false);
-          setMicStatusText('Recording stopped. Review the text and click "Extract & Populate Form".');
         }
       };
 
       return recognition;
     } catch (e) {
-      console.error('Speech recognition creation error:', e);
+      console.error(
+        'Could not create browser recognition:',
+        e
+      );
+
       return null;
     }
   };
 
-  const startListening = async () => {
+  // Native Android speech recognition
+  const startNativeListening = async () => {
+    setMicStatusText(
+      'Requesting Android microphone permission...'
+    );
+
+    const permission =
+      await SpeechRecognition.requestPermissions();
+
+    if (permission.speechRecognition !== 'granted') {
+      throw new Error(
+        'Microphone permission was not granted. Open Android Settings > Apps > VeeraGym > Permissions and allow Microphone.'
+      );
+    }
+
+    const availability =
+      await SpeechRecognition.available();
+
+    if (!availability.available) {
+      throw new Error(
+        'Speech recognition is unavailable. Check that a speech recognition service is installed and enabled on this phone.'
+      );
+    }
+
+    await removeNativeListeners();
+
+    // Partial speech results
+    const partialHandle =
+      await SpeechRecognition.addListener(
+        'partialResults',
+        (event: any) => {
+          if (!explicitlyRecordingRef.current) {
+            return;
+          }
+
+          if (
+            typeof event.accumulatedText === 'string' &&
+            event.accumulatedText.trim()
+          ) {
+            setTranscriptSafely(event.accumulatedText);
+          } else if (
+            Array.isArray(event.matches) &&
+            event.matches[0]
+          ) {
+            const match = String(event.matches[0]).trim();
+
+            if (match) {
+              const base =
+                accumulatedTranscriptRef.current.trim();
+
+              setTranscript(
+                base &&
+                !base.toLowerCase().endsWith(match.toLowerCase())
+                  ? `${base} ${match}`
+                  : match
+              );
+            }
+          }
+        }
+      );
+
+    nativeListenersRef.current.push(partialHandle);
+
+    // Final speech segments
+    const segmentHandle =
+      await SpeechRecognition.addListener(
+        'segmentResults',
+        (event: any) => {
+          if (
+            !explicitlyRecordingRef.current ||
+            !Array.isArray(event.matches)
+          ) {
+            return;
+          }
+
+          const segment = event.matches
+            .map((v: string) => String(v).trim())
+            .filter(Boolean)
+            .join(' ');
+
+          if (segment) {
+            const next = [
+              accumulatedTranscriptRef.current.trim(),
+              segment,
+            ]
+              .filter(Boolean)
+              .join(' ');
+
+            accumulatedTranscriptRef.current = next;
+            setTranscript(next);
+          }
+        }
+      );
+
+    nativeListenersRef.current.push(segmentHandle);
+
+    // Native recognition errors
+    const errorHandle =
+      await SpeechRecognition.addListener(
+        'error',
+        (event: any) => {
+          if (!explicitlyRecordingRef.current) {
+            return;
+          }
+
+          console.warn(
+            'Native speech recognition error:',
+            event
+          );
+
+          setError(
+            `Microphone recognition error: ${
+              event?.message ||
+              event?.code ||
+              'Unknown error'
+            }`
+          );
+        }
+      );
+
+    nativeListenersRef.current.push(errorHandle);
+
+    nativeRecordingRef.current = true;
+
+    await SpeechRecognition.start({
+      language: 'en-IN',
+      partialResults: true,
+      maxResults: 5,
+      popup: false,
+    });
+
+    setIsListening(true);
     setError(null);
+
+    setMicStatusText(
+      'Android microphone is active. Speak customer details, then tap Stop Recording.'
+    );
+  };
+
+  // Start recording
+  const startListening = async () => {
+    if (isListening || isProcessing) {
+      return;
+    }
+
+    setError(null);
+
     accumulatedTranscriptRef.current = transcript.trim();
 
-    // Trigger permission dialog if needed
+    explicitlyRecordingRef.current = true;
+
     try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => {});
+      if (isNative) {
+        await startNativeListening();
+      } else {
+        const recognition = createBrowserRecognition();
+
+        if (!recognition) {
+          explicitlyRecordingRef.current = false;
+
+          setError(
+            'Speech recognition is not supported in this browser. Please type the details or use the Android app.'
+          );
+
+          return;
+        }
+
+        recognitionRef.current = recognition;
+        recognition.start();
       }
-    } catch (_) {}
+    } catch (e: any) {
+      console.error(
+        'Could not start speech recognition:',
+        e
+      );
 
-    const recognition = createRecognition();
-    if (!recognition) {
-      setError('Speech recognition is not available in this browser. Please type into the box or click a sample prompt below.');
-      return;
-    }
+      explicitlyRecordingRef.current = false;
+      nativeRecordingRef.current = false;
 
-    recognitionRef.current = recognition;
-    isExplicitlyRecordingRef.current = true;
+      await removeNativeListeners();
 
-    try {
-      recognition.start();
-    } catch (err: any) {
-      console.warn('Recognition start error:', err);
-      // If already started, mark explicit recording
-      setIsListening(true);
+      setIsListening(false);
+
+      setError(
+        e?.message ||
+        'Could not start the microphone. Check app microphone permission and try again.'
+      );
+
+      setMicStatusText(
+        'Microphone could not be started. Check permissions and retry.'
+      );
     }
   };
 
-  const stopListening = () => {
-    isExplicitlyRecordingRef.current = false;
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (_) {}
-    }
-    setIsListening(false);
-  };
-
+  // Send transcript to existing Gemini parsing backend
   const handleProcess = async () => {
     if (!transcript.trim()) {
-      setError('Please speak or enter customer information first.');
+      setError(
+        'Please speak or enter customer information first.'
+      );
+
       return;
     }
 
-    stopListening();
+    await stopListening();
+
     setError(null);
     setIsProcessing(true);
 
     try {
-      const data = await parseVoiceTranscript(transcript);
-      setIsProcessing(false);
-      onExtracted(data);
+      const data = await parseVoiceTranscript(
+        transcript.trim()
+      );
+
+      onExtracted(data as ExtractedData);
       onClose();
-    } catch (err: any) {
+    } catch (e: any) {
+      setError(
+        e?.message ||
+        'Could not parse speech. Verify the text or enter the details manually.'
+      );
+    } finally {
       setIsProcessing(false);
-      setError(err.message || 'Could not parse speech. Please verify the text or enter manually.');
     }
   };
 
-  const setSamplePrompt = (text: string) => {
-    stopListening();
-    accumulatedTranscriptRef.current = text;
-    setTranscript(text);
+  const closeModal = async () => {
+    await stopListening();
+    onClose();
+  };
+
+  const clearTranscript = () => {
+    accumulatedTranscriptRef.current = '';
+    setTranscript('');
     setError(null);
-    setMicStatusText('Sample prompt loaded. Click "Extract & Populate Form" to continue.');
   };
 
   const formatTimer = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    return `${String(
+      Math.floor(seconds / 60)
+    ).padStart(2, '0')}:${String(
+      seconds % 60
+    ).padStart(2, '0')}`;
   };
+
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
       <div className="relative w-full max-w-xl bg-[#161a20] border border-neutral-700/80 rounded-2xl shadow-2xl p-6 text-neutral-200">
+
         <button
-          onClick={() => {
-            stopListening();
-            onClose();
-          }}
+          type="button"
+          onClick={closeModal}
           className="absolute top-4 right-4 p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition-colors cursor-pointer"
           aria-label="Close modal"
         >
@@ -253,10 +582,14 @@ export const VoiceRegistrationModal: React.FC<Props> = ({
           <div className="p-2.5 bg-gradient-to-br from-neutral-700 to-neutral-800 border border-neutral-600 rounded-xl text-white shadow-md">
             <Mic className="w-6 h-6 text-emerald-400" />
           </div>
+
           <div>
-            <h3 className="text-xl font-bold text-white tracking-tight">Continuous Voice Registration</h3>
+            <h3 className="text-xl font-bold text-white tracking-tight">
+              Continuous Voice Registration
+            </h3>
+
             <p className="text-xs text-neutral-400 font-medium">
-              Records continuously without timing out until you explicitly click Stop
+              Speak customer details, then stop and review the transcript
             </p>
           </div>
         </div>
@@ -269,14 +602,19 @@ export const VoiceRegistrationModal: React.FC<Props> = ({
         )}
 
         <div className="space-y-4">
-          {/* Main Recording Control Card */}
-          <div className={`flex flex-col items-center justify-center py-6 px-4 rounded-xl border transition-all ${
-            isListening
-              ? 'bg-red-950/20 border-red-500/60 shadow-[0_0_30px_rgba(239,68,68,0.2)]'
-              : 'bg-[#1e232b] border-neutral-800'
-          }`}>
+
+          {/* Recording controls */}
+          <div
+            className={`flex flex-col items-center justify-center py-6 px-4 rounded-xl border transition-all ${
+              isListening
+                ? 'bg-red-950/20 border-red-500/60 shadow-[0_0_30px_rgba(239,68,68,0.2)]'
+                : 'bg-[#1e232b] border-neutral-800'
+            }`}
+          >
+
             {isListening ? (
               <div className="flex flex-col items-center">
+
                 <button
                   type="button"
                   onClick={stopListening}
@@ -285,12 +623,15 @@ export const VoiceRegistrationModal: React.FC<Props> = ({
                 >
                   <Square className="w-8 h-8 fill-white" />
                 </button>
+
                 <div className="mt-3 flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+
                   <span className="font-mono text-sm font-bold text-red-400 tabular-nums">
                     RECORDING: {formatTimer(recordingSeconds)}
                   </span>
                 </div>
+
                 <button
                   type="button"
                   onClick={stopListening}
@@ -298,117 +639,110 @@ export const VoiceRegistrationModal: React.FC<Props> = ({
                 >
                   Stop Recording (Done Speaking)
                 </button>
+
               </div>
             ) : (
               <div className="flex flex-col items-center">
+
                 <button
                   type="button"
                   onClick={startListening}
-                  className="relative p-6 rounded-full bg-neutral-800 hover:bg-neutral-700 border-2 border-emerald-500/80 text-white shadow-xl hover:scale-105 transition-all cursor-pointer group ring-4 ring-emerald-500/20"
+                  disabled={isProcessing}
+                  className="relative p-6 rounded-full bg-neutral-800 hover:bg-neutral-700 border-2 border-emerald-500/80 text-white shadow-xl hover:scale-105 transition-all cursor-pointer group ring-4 ring-emerald-500/20 disabled:opacity-50"
                   title="Start Continuous Recording"
                 >
                   <Mic className="w-9 h-9 text-emerald-400 group-hover:scale-110 transition-transform" />
                 </button>
+
                 <span className="text-xs font-bold mt-3 text-white">
-                  Click to Start Continuous Recording
+                  Click to Start Recording
                 </span>
+
               </div>
             )}
 
             <span className="text-[11px] text-neutral-300 mt-2 text-center max-w-md font-medium">
               {micStatusText}
             </span>
+
           </div>
 
-          {/* Transcript Display / Input */}
+          {/* Transcript */}
           <div>
+
             <div className="flex items-center justify-between text-xs text-neutral-400 mb-1.5">
+
               <span className="font-semibold text-neutral-300 flex items-center gap-1.5">
                 <Volume2 className="w-3.5 h-3.5 text-neutral-400" />
                 <span>Accumulated Spoken Transcript:</span>
               </span>
+
               {transcript && (
                 <button
                   type="button"
-                  onClick={() => {
-                    accumulatedTranscriptRef.current = '';
-                    setTranscript('');
-                  }}
-                  className="text-neutral-400 hover:text-white flex items-center gap-1 text-[11px] cursor-pointer"
+                  onClick={clearTranscript}
+                  disabled={isListening}
+                  className="text-neutral-400 hover:text-white flex items-center gap-1 text-[11px] cursor-pointer disabled:opacity-40"
                 >
-                  <RefreshCw className="w-3 h-3" /> Clear Transcript
+                  <RefreshCw className="w-3 h-3" />
+                  Clear Transcript
                 </button>
               )}
+
             </div>
+
             <textarea
               rows={3}
               value={transcript}
-              onChange={(e) => {
-                setTranscript(e.target.value);
-                accumulatedTranscriptRef.current = e.target.value;
+              onChange={(event) => {
+                setTranscript(event.target.value);
+                accumulatedTranscriptRef.current = event.target.value;
               }}
-              placeholder='Spoken words will continuously accumulate here until you click Stop... (e.g. "Add Rahul Kumar, weight 72 kilograms, mobile number 9876543210, non-cardio membership, paid 600 rupees on 15th October 2026.")'
+              placeholder="Spoken words will appear here... Speak customer name, mobile number, weight, cardio or non-cardio, and payment details."
               className="w-full bg-[#1e232b] border border-neutral-700 text-white placeholder-neutral-500 rounded-xl p-3 text-sm focus:outline-none focus:border-neutral-500 leading-relaxed font-sans"
             />
+
           </div>
 
-          {/* Quick Voice Test Prompts */}
-          <div>
-            <span className="text-[11px] uppercase tracking-wider font-semibold text-neutral-400 block mb-2">
-              Or Click a Preset Voice Sample:
+          {/* Speaking format */}
+          <div className="bg-[#1a1f27] border border-neutral-800 rounded-xl p-3.5 space-y-1.5 text-xs text-neutral-300">
+
+            <span className="text-[11px] uppercase tracking-wider font-semibold text-neutral-400 block">
+              Recommended Voice Speaking Format:
             </span>
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  setSamplePrompt(
-                    'Add Rahul Kumar, weight 72 kilograms, mobile number 9876543210, non-cardio membership, paid 600 rupees on 15th October 2026.'
-                  )
-                }
-                className="text-left text-xs bg-[#1e232b] hover:bg-neutral-800 border border-neutral-800/80 hover:border-neutral-600 rounded-lg p-2.5 transition-colors text-neutral-300 flex items-center justify-between group cursor-pointer"
-              >
-                <span className="truncate">
-                  "Add Rahul Kumar, weight 72 kilograms, mobile number 9876543210, non-cardio membership, paid 600 rupees on 15th October 2026."
-                </span>
-                <Play className="w-3.5 h-3.5 text-neutral-400 group-hover:text-emerald-400 shrink-0 ml-2" />
-              </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  setSamplePrompt(
-                    'Register Vikram Rathore, weight 84 kg, phone 9845012345, cardio membership 1000 rupees paid via UPI on 28th October 2026.'
-                  )
-                }
-                className="text-left text-xs bg-[#1e232b] hover:bg-neutral-800 border border-neutral-800/80 hover:border-neutral-600 rounded-lg p-2.5 transition-colors text-neutral-300 flex items-center justify-between group cursor-pointer"
-              >
-                <span className="truncate">
-                  "Register Vikram Rathore, weight 84 kg, phone 9845012345, cardio membership 1000 rupees paid via UPI on 28th October 2026."
-                </span>
-                <Play className="w-3.5 h-3.5 text-neutral-400 group-hover:text-emerald-400 shrink-0 ml-2" />
-              </button>
-            </div>
+            <p className="text-neutral-400 leading-relaxed">
+              Speak clearly in one or multiple sentences:
+              <br />
+
+              <span className="text-emerald-400 font-medium">
+                "Register [Name], weight [X] kg, mobile number [10 digits], [cardio / non-cardio] membership, paid [amount] rupees via [Cash / UPI / Card] on [Date]."
+              </span>
+            </p>
+
           </div>
+
         </div>
 
+        {/* Footer buttons */}
         <div className="mt-6 pt-4 border-t border-neutral-800 flex items-center gap-3">
+
           <button
             type="button"
-            onClick={() => {
-              stopListening();
-              onClose();
-            }}
+            onClick={closeModal}
             disabled={isProcessing}
-            className="flex-1 py-3 px-4 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
+            className="flex-1 py-3 px-4 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-sm font-semibold transition-colors cursor-pointer disabled:opacity-50"
           >
             Cancel
           </button>
+
           <button
             type="button"
             onClick={handleProcess}
             disabled={isProcessing || !transcript.trim()}
             className="flex-1 py-3 px-4 bg-white hover:bg-neutral-100 text-neutral-950 font-bold rounded-xl text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-lg hover:shadow-xl"
           >
+
             {isProcessing ? (
               <span className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 animate-spin text-neutral-950" />
@@ -420,8 +754,11 @@ export const VoiceRegistrationModal: React.FC<Props> = ({
                 <ArrowRight className="w-4 h-4" />
               </>
             )}
+
           </button>
+
         </div>
+
       </div>
     </div>
   );

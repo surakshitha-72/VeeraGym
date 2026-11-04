@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+secrets/
+data/gym_database.json
+data/*.tmp.*
