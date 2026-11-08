@@ -8,19 +8,80 @@ import {
   RenewalReminder
 } from '../types.ts';
 
-// Backend URL for local Android testing.
-// Keep the laptop and phone on the same Wi-Fi network.
-const API_BASE_URL = 'http://192.168.0.105:3000';
 
-// Common API request helper
-async function apiFetch(
+// Backend URL
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ??
+  (import.meta.env.PROD ? '' : 'http://192.168.0.108:3000');
+// ADMIN AUTHENTICATION
+const AUTH_TOKEN_KEY = 'veeragym_admin_token';
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function saveAuthToken(token: string): void {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+export function isAuthenticated(): boolean {
+  return !!getAuthToken();
+}
+
+export async function loginAdmin(
+  username: string,
+  password: string
+): Promise<{ success: boolean; token: string; username: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Login failed. Please try again.');
+  }
+
+  saveAuthToken(data.token);
+  return data;
+}
+
+export function logoutAdmin(): void {
+  clearAuthToken();
+  window.dispatchEvent(new Event('veeragym:logout'));
+}
+
+// COMMON AUTHENTICATED API REQUEST HELPER
+export async function apiFetch(
   path: string,
   options?: RequestInit
 ): Promise<Response> {
   const url = `${API_BASE_URL}${path}`;
 
   try {
-    const response = await fetch(url, options);
+    const headers = new Headers(options?.headers);
+    const token = getAuthToken();
+
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
+    const response = await fetch(url, {
+      ...options,
+      headers,
+    });
+
+    if (response.status === 401 && token) {
+      clearAuthToken();
+      window.dispatchEvent(new Event('veeragym:auth-expired'));
+      throw new Error('Your session has expired. Please log in again.');
+    }
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');

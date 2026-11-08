@@ -9,3 +9,18 @@ coverage/
 secrets/
 data/gym_database.json
 data/*.tmp.*
+data/
+
+# Local database backups
+backup/
+# Private credentials and signing keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+service-account*.json
+firebase-adminsdk*.json
+.vercel
+.env*

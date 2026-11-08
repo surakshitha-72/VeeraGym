@@ -4,6 +4,11 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { LoginView } from './views/LoginView.tsx';
+import {
+  isAuthenticated,
+  logoutAdmin,
+} from './services/api.ts';
 import { BellRing, Smartphone } from 'lucide-react';
 import { Customer, CustomerCategory, DashboardStats, PaymentRecord, RenewalReminder } from './types.ts';
 import { fetchCustomers, fetchDashboardStats, fetchPayments, fetchReminders } from './services/api.ts';
@@ -26,6 +31,21 @@ import { PushNotificationManagerModal } from './components/PushNotificationManag
 import { getPushStatus, registerServiceWorker, PushStatus } from './services/pushNotifications.ts';
 
 export default function App() {
+  const [authenticated, setAuthenticated] = useState(isAuthenticated());
+
+useEffect(() => {
+  const handleLogout = () => setAuthenticated(false);
+
+  window.addEventListener('veeragym:logout', handleLogout);
+  window.addEventListener('veeragym:auth-expired', handleLogout);
+
+  return () => {
+    window.removeEventListener('veeragym:logout', handleLogout);
+    window.removeEventListener('veeragym:auth-expired', handleLogout);
+  };
+}, []);
+
+
   const [navItem, setNavItem] = useState<NavItem>('home');
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
@@ -81,9 +101,11 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
+ useEffect(() => {
+  if (authenticated) {
     loadData();
-  }, [dataRefreshTrigger]);
+  }
+}, [dataRefreshTrigger, authenticated]);
 
   // Deep linking and Outside-App Notification handling
   useEffect(() => {
@@ -201,8 +223,13 @@ export default function App() {
 
   const selectedCustomerObj = customers.find((c) => c.id === selectedCustomerId) || null;
   const dueTodayCount = reminders.filter((r) => r.status === 'Due Today').length;
-
+if (!authenticated) {
   return (
+    <LoginView onLoginSuccess={() => setAuthenticated(true)} />
+  );
+}
+  return (
+
     <div className="relative min-h-screen bg-[#0d0f13] text-neutral-100 selection:bg-neutral-700 selection:text-white">
       {/* Background with gym equipment photography and deep charcoal scrim */}
       <div
@@ -250,6 +277,13 @@ export default function App() {
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#181d24] hover:bg-[#202732] border border-neutral-700/80 text-xs transition-colors cursor-pointer"
               title="Manage outside-app device push notifications"
             >
+              <button
+  onClick={logoutAdmin}
+  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium transition-colors"
+  title="Logout from VeeraGym"
+>
+  Logout
+</button>
               <BellRing className={`w-3.5 h-3.5 ${pushStatus?.subscribed ? 'text-emerald-400' : 'text-amber-400'}`} />
               <span className="hidden sm:inline text-neutral-300 font-medium">Device Push</span>
               <span className={`w-2 h-2 rounded-full ${pushStatus?.subscribed ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-500'}`} />

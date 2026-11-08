@@ -1,10 +1,11 @@
 import { parseVoiceTranscriptRobust } from './server/voiceParser.ts';
 import { firebaseMessaging } from './server/firebaseAdmin.ts';
 import express from 'express';
+import { adminLogin, requireAdmin } from './server/auth.ts';
 import dotenv from 'dotenv';
 import path from 'path';
 import { GoogleGenAI, Type } from '@google/genai';
-import { db, getTodayDateString } from './server/db.ts';
+import { db, getTodayDateString } from './server/db.supabase.ts';
 import {
   getVapidPublicKey,
   broadcastPush,
@@ -19,6 +20,17 @@ const port = Number(process.env.PORT) || 3000;
 
 // Allow JSON request bodies
 app.use(express.json());
+// Admin authentication
+app.post('/api/auth/login', adminLogin);
+
+// Protect all API endpoints except login and the public VAPID key
+app.use('/api', (req, res, next) => {
+  if (req.path === '/push/vapid-public-key') {
+    return next();
+  }
+
+  requireAdmin(req, res, next);
+});
 
 // Server-side Gemini Client
 const ai = new GoogleGenAI({
@@ -35,9 +47,9 @@ const ai = new GoogleGenAI({
 // --------------------------------------------------
 
 // Dashboard statistics
-app.get('/api/dashboard/stats', (req, res) => {
+app.get('/api/dashboard/stats', async (req, res) => {
   try {
-    const stats = db.getDashboardStats();
+    const stats = await db.getDashboardStats();
     res.json(stats);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -45,19 +57,19 @@ app.get('/api/dashboard/stats', (req, res) => {
 });
 
 // Customers CRUD
-app.get('/api/customers', (req, res) => {
+app.get('/api/customers', async (req, res) => {
   try {
     const { category, status, search } = req.query;
-    const list = db.getCustomers(category as any, status as string, search as string);
+    const list = await db.getCustomers(category as any, status as string, search as string);
     res.json(list);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/customers/:id', (req, res) => {
+app.get('/api/customers/:id', async (req, res) => {
   try {
-    const customer = db.getCustomerById(req.params.id);
+    const customer = await db.getCustomerById(req.params.id);
 
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
@@ -68,8 +80,7 @@ app.get('/api/customers/:id', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-app.post('/api/customers', (req, res) => {
+app.post('/api/customers', async (req, res) => {
   try {
     const {
       name,
@@ -89,7 +100,7 @@ app.post('/api/customers', (req, res) => {
       });
     }
 
-    const result = db.createCustomer({
+    const result = await db.createCustomer({
       name,
       phone,
       weightKg: Number(weightKg) || 0,
@@ -107,18 +118,18 @@ app.post('/api/customers', (req, res) => {
   }
 });
 
-app.put('/api/customers/:id', (req, res) => {
+app.put('/api/customers/:id', async (req, res) => {
   try {
-    const updated = db.updateCustomer(req.params.id, req.body);
+    const updated = await db.updateCustomer(req.params.id, req.body);
     res.json(updated);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete('/api/customers/:id', (req, res) => {
+app.delete('/api/customers/:id', async (req, res) => {
   try {
-    const ok = db.deleteCustomer(req.params.id);
+    const ok = await db.deleteCustomer(req.params.id);
 
     if (!ok) {
       return res.status(404).json({ error: 'Customer not found' });
@@ -131,21 +142,21 @@ app.delete('/api/customers/:id', (req, res) => {
 });
 
 // Individual Customer Monthly Payment Register
-app.get('/api/customers/:id/register', (req, res) => {
+app.get('/api/customers/:id/register', async (req, res) => {
   try {
     const year = Number(req.query.year) || new Date().getFullYear();
-    const register = db.getCustomerRegister(req.params.id, year);
+    const register = await db.getCustomerRegister(req.params.id, year);
     res.json(register);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/customers/:id/register-status', (req, res) => {
+app.post('/api/customers/:id/register-status', async (req, res) => {
   try {
     const { year, monthIndex, isActive, isInactive } = req.body;
 
-    const register = db.updateMonthStatus(
+    const register = await db.updateMonthStatus(
       req.params.id,
       Number(year),
       Number(monthIndex),
@@ -160,11 +171,11 @@ app.post('/api/customers/:id/register-status', (req, res) => {
 });
 
 // Payments
-app.get('/api/payments', (req, res) => {
+app.get('/api/payments', async (req, res) => {
   try {
     const { customerId, category, month, year, search } = req.query;
 
-    const payments = db.getPayments({
+    const payments = await db.getPayments({
       customerId: customerId as string,
       category: category as any,
       month: month ? Number(month) : undefined,
@@ -178,7 +189,7 @@ app.get('/api/payments', (req, res) => {
   }
 });
 
-app.post('/api/payments', (req, res) => {
+app.post('/api/payments', async (req, res) => {
   try {
     const {
       customerId,
@@ -194,7 +205,7 @@ app.post('/api/payments', (req, res) => {
       return res.status(400).json({ error: 'All payment fields are required' });
     }
 
-    const result = db.recordPayment({
+    const result = await db.recordPayment({
       customerId,
       amount: Number(amount),
       paymentDate,
@@ -211,29 +222,29 @@ app.post('/api/payments', (req, res) => {
 });
 
 // Renewal Reminders
-app.get('/api/reminders', (req, res) => {
+app.get('/api/reminders', async (req, res) => {
   try {
-    const reminders = db.getRenewalReminders();
+    const reminders = await db.getRenewalReminders();
     res.json(reminders);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put('/api/reminders/:id', (req, res) => {
+app.put('/api/reminders/:id', async (req, res) => {
   try {
-    const updated = db.updateReminder(req.params.id, req.body);
+    const updated = await db.updateReminder(req.params.id, req.body);
     res.json(updated);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/reminders/:id/notify', (req, res) => {
+app.post('/api/reminders/:id/notify', async (req, res) => {
   try {
     const nowStr = new Date().toISOString();
 
-    const updated = db.updateReminder(req.params.id, {
+    const updated = await db.updateReminder(req.params.id, {
       status: 'Sent',
       lastNotifiedAt: nowStr,
     });
@@ -297,7 +308,6 @@ Rules:
           },
         },
       });
-
       const parsed = JSON.parse(response.text || '{}');
 
       if (parsed.category) {
@@ -341,12 +351,11 @@ Rules:
     });
   }
 });
-
 // --------------------------------------------------
 // PUSH NOTIFICATIONS
 // --------------------------------------------------
 // Register Android device for Firebase Cloud Messaging
-app.post('/api/push/fcm/register', (req, res) => {
+app.post('/api/push/fcm/register', async (req, res) => {
   try {
     const { token, platform, userAgent } = req.body;
 
@@ -359,7 +368,7 @@ app.post('/api/push/fcm/register', (req, res) => {
 
     const now = new Date().toISOString();
 
-    db.saveFCMDevice({
+    await db.saveFCMDevice({
       token,
       platform: platform || 'android',
       userAgent: userAgent || req.headers['user-agent'] || 'Unknown',
@@ -381,7 +390,7 @@ app.post('/api/push/fcm/register', (req, res) => {
   }
 });
 // Unregister Android device from Firebase Cloud Messaging
-app.post('/api/push/fcm/unregister', (req, res) => {
+app.post('/api/push/fcm/unregister', async (req, res) => {
   try {
     const { token } = req.body;
 
@@ -392,7 +401,7 @@ app.post('/api/push/fcm/unregister', (req, res) => {
       });
     }
 
-    db.removeFCMDevice(token);
+    await db.removeFCMDevice(token);
 
     console.log('[VeeraGym FCM] Android device unregistered');
 
@@ -407,10 +416,9 @@ app.post('/api/push/fcm/unregister', (req, res) => {
     });
   }
 });
-// Send test notification to registered Android devices
 app.post('/api/push/fcm/test', async (req, res) => {
   try {
-    const devices = db.getFCMDevices();
+    const devices = await db.getFCMDevices();
 
     if (devices.length === 0) {
       return res.status(404).json({
@@ -441,7 +449,6 @@ app.post('/api/push/fcm/test', async (req, res) => {
         }
       })
     );
-
     const sent = results.filter((result) => result.success).length;
 
     return res.json({
@@ -457,17 +464,16 @@ app.post('/api/push/fcm/test', async (req, res) => {
   }
 });
 // Get VAPID public key
-app.get('/api/push/vapid-public-key', (req, res) => {
+app.get('/api/push/vapid-public-key', async (req, res) => {
   try {
-    const publicKey = getVapidPublicKey();
+    const publicKey = await getVapidPublicKey();
     res.json({ publicKey });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Subscribe device
-app.post('/api/push/subscribe', (req, res) => {
+app.post('/api/push/subscribe', async (req, res) => {
   try {
     const { subscription, userAgent } = req.body;
 
@@ -477,7 +483,7 @@ app.post('/api/push/subscribe', (req, res) => {
       });
     }
 
-    db.savePushSubscription({
+    await db.savePushSubscription({
       endpoint: subscription.endpoint,
       expirationTime: subscription.expirationTime || null,
       keys: {
@@ -499,8 +505,7 @@ app.post('/api/push/subscribe', (req, res) => {
   }
 });
 
-// Unsubscribe device
-app.post('/api/push/unsubscribe', (req, res) => {
+app.post('/api/push/unsubscribe', async (req, res) => {
   try {
     const { endpoint } = req.body;
 
@@ -508,15 +513,13 @@ app.post('/api/push/unsubscribe', (req, res) => {
       return res.status(400).json({ error: 'Endpoint is required' });
     }
 
-    db.removePushSubscription(endpoint);
+    await db.removePushSubscription(endpoint);
 
     res.json({ success: true, message: 'Device unsubscribed' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Send test notification
 app.post('/api/push/test', async (req, res) => {
   try {
     const { subscription } = req.body;
@@ -569,30 +572,12 @@ app.post('/api/push/check-and-notify', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// --------------------------------------------------
-// BACKGROUND RENEWAL CHECKER
-// --------------------------------------------------
-
-setInterval(async () => {
-  try {
-    db.getRenewalReminders();
-    await evaluateAndSendRenewalAlerts();
-  } catch (err) {
-    console.error('Background renewal check error:', err);
-  }
-}, 30 * 60 * 1000);
-
-// --------------------------------------------------
-// SERVER STARTUP
-// --------------------------------------------------
-
 async function startServer() {
   try {
     if (process.env.NODE_ENV === 'production') {
       app.use(express.static(path.resolve(process.cwd(), 'dist')));
 
-      app.get('*', (req, res) => {
+      app.get('*', async (req, res) => {
         res.sendFile(path.resolve(process.cwd(), 'dist', 'index.html'));
       });
     } else {
@@ -635,4 +620,10 @@ async function startServer() {
   }
 }
 
-startServer();
+// Start the server locally, but let Vercel manage it in production.
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+// Export the Express app for Vercel.
+export default app;

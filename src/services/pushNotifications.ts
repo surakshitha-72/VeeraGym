@@ -7,6 +7,7 @@
 import {
   registerFCMDevice,
   unregisterFCMDevice,
+  apiFetch,
 } from './api.ts';
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
@@ -247,7 +248,7 @@ export async function subscribeDeviceToPush(): Promise<{
     }
 
     // 5. Send subscription to server
-    const subRes = await fetch('/api/push/subscribe', {
+    const subRes = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -325,7 +326,7 @@ export async function unsubscribeDeviceFromPush(): Promise<{
       const subscription = await registration.pushManager.getSubscription();
 
       if (subscription) {
-        await fetch('/api/push/unsubscribe', {
+        await apiFetch('/api/push/unsubscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: subscription.endpoint }),
@@ -354,7 +355,7 @@ export async function sendTestNotification(): Promise<{ success: boolean; messag
     const registration = await navigator.serviceWorker.getRegistration();
     const subscription = registration ? await registration.pushManager.getSubscription() : null;
 
-    const res = await fetch('/api/push/test', {
+    const res = await apiFetch('/api/push/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -383,7 +384,7 @@ export async function triggerRenewalCheckAndNotify(): Promise<{
   message: string;
 }> {
   try {
-    const res = await fetch('/api/push/check-and-notify', {
+    const res = await apiFetch('/api/push/check-and-notify', {
       method: 'POST',
     });
     const data = await res.json();

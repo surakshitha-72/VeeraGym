@@ -1,31 +1,43 @@
 import webpush from 'web-push';
-import { db } from './db.ts';
+import { db } from './db.supabase.ts';
 import { firebaseMessaging } from './firebaseAdmin.ts';
 import { PushNotificationPayload, StoredPushSubscription } from '../src/types.ts';
 
+// Load VAPID keys lazily from Supabase. Cache the promise so concurrent
+// requests share the same initialization and serverless instances reuse keys.
+let vapidInitialization: Promise<{ publicKey: string; privateKey: string }> | null = null;
 
-// Initialize VAPID Keys
-function initVapid() {
-  let keys = db.getVapidKeys();
-  if (!keys || !keys.publicKey || !keys.privateKey) {
-    keys = webpush.generateVAPIDKeys();
-    db.setVapidKeys(keys);
-    console.log('[VeeraGym Push] Generated new VAPID keys and saved to database');
+async function ensureVapid(): Promise<{ publicKey: string; privateKey: string }> {
+  if (!vapidInitialization) {
+    vapidInitialization = (async () => {
+      let keys = await db.getVapidKeys();
+
+      if (!keys?.publicKey || !keys?.privateKey) {
+        keys = webpush.generateVAPIDKeys();
+        await db.setVapidKeys(keys);
+        console.log('[VeeraGym Push] Generated new VAPID keys and saved to Supabase');
+      }
+
+      webpush.setVapidDetails(
+        'mailto:admin@veeragym.com',
+        keys.publicKey,
+        keys.privateKey
+      );
+
+      return keys;
+    })().catch((error) => {
+      // Permit a later request to retry if Supabase initialization fails.
+      vapidInitialization = null;
+      throw error;
+    });
   }
 
-  webpush.setVapidDetails(
-    'mailto:admin@veeragym.com',
-    keys.publicKey,
-    keys.privateKey
-  );
-
-  return keys;
+  return vapidInitialization;
 }
 
-const vapidKeys = initVapid();
-
-export function getVapidPublicKey(): string {
-  return vapidKeys.publicKey;
+export async function getVapidPublicKey(): Promise<string> {
+  const keys = await ensureVapid();
+  return keys.publicKey;
 }
 
 export async function sendPushToSubscription(
@@ -33,6 +45,8 @@ export async function sendPushToSubscription(
   payload: PushNotificationPayload
 ): Promise<boolean> {
   try {
+    await ensureVapid();
+
     const pushSubscription = {
       endpoint: sub.endpoint,
       expirationTime: sub.expirationTime || null,
@@ -46,30 +60,35 @@ export async function sendPushToSubscription(
       pushSubscription,
       JSON.stringify(payload),
       {
-        TTL: 60 * 60 * 24, // 24 hours
+        TTL: 60 * 60 * 24,
         urgency: 'high',
       }
     );
     return true;
   } catch (err: any) {
-    // If subscription is expired (404 or 410 Gone), remove it
     if (err.statusCode === 404 || err.statusCode === 410) {
       console.log(`[VeeraGym Push] Subscription expired, removing endpoint: ${sub.endpoint.slice(0, 30)}...`);
-      db.removePushSubscription(sub.endpoint);
+      try {
+        await db.removePushSubscription(sub.endpoint);
+      } catch (removeError: any) {
+        console.error('[VeeraGym Push] Could not remove expired subscription:', removeError.message || removeError);
+      }
     } else {
-      console.error(`[VeeraGym Push] Error sending push notification:`, err.message || err);
+      console.error('[VeeraGym Push] Error sending push notification:', err.message || err);
     }
     return false;
   }
 }
 
-export async function broadcastPush(payload: PushNotificationPayload): Promise<{ total: number; sent: number }> {
-  const subscriptions = db.getPushSubscriptions();
+export async function broadcastPush(
+  payload: PushNotificationPayload
+): Promise<{ total: number; sent: number }> {
+  const subscriptions = await db.getPushSubscriptions();
   if (subscriptions.length === 0) {
     return { total: 0, sent: 0 };
   }
 
-  let sent = 0;
+let sent = 0;
   for (const sub of subscriptions) {
     const ok = await sendPushToSubscription(sub, payload);
     if (ok) sent++;
@@ -77,11 +96,12 @@ export async function broadcastPush(payload: PushNotificationPayload): Promise<{
 
   return { total: subscriptions.length, sent };
 }
-// Send Firebase Cloud Messaging notification to all registered Android devices
+
+// Send Firebase Cloud Messaging notification to all registered Android devices.
 export async function broadcastFCM(
   payload: PushNotificationPayload
 ): Promise<{ total: number; sent: number }> {
-  const devices = db.getFCMDevices();
+  const devices = await db.getFCMDevices();
 
   if (devices.length === 0) {
     return { total: 0, sent: 0 };
@@ -114,17 +134,17 @@ export async function broadcastFCM(
 
       sent++;
     } catch (error: any) {
-      console.error(
-        '[VeeraGym FCM] Notification failed:',
-        error.message
-      );
+      console.error('[VeeraGym FCM] Notification failed:', error.message || error);
 
-      // Remove invalid or expired FCM tokens
       if (
         error.code === 'messaging/registration-token-not-registered' ||
         error.code === 'messaging/invalid-registration-token'
       ) {
-        db.removeFCMDevice(device.token);
+        try {
+          await db.removeFCMDevice(device.token);
+        } catch (removeError: any) {
+          console.error('[VeeraGym FCM] Could not remove invalid token:', removeError.message || removeError);
+        }
       }
     }
   }
@@ -135,14 +155,13 @@ export async function broadcastFCM(
   };
 }
 
-// Background Evaluation: checks upcoming renewals (due in 2 days or less) and fires outside-app push notifications
 export async function evaluateAndSendRenewalAlerts(): Promise<{
   triggered: boolean;
   count: number;
   message: string;
   payload?: PushNotificationPayload;
 }> {
-  const upcoming = db.getUpcomingRenewalsForNotification(2);
+  const upcoming = await db.getUpcomingRenewalsForNotification(2);
 
   if (upcoming.length === 0) {
     return {
@@ -156,12 +175,10 @@ export async function evaluateAndSendRenewalAlerts(): Promise<{
 
   if (upcoming.length === 1) {
     const item = upcoming[0];
-    const daysLabel = item.daysRemaining === 0 ? 'Due Today' : `${item.daysText}`;
+    const daysLabel = item.daysRemaining === 0 ? 'Due Today' : item.daysText;
 
-    // Notification must contain: Customer Name, Renewal Date, Amount Due, Days Remaining
-    // Example: "VeeraGym: Rahul Kumar's membership renewal is due in 2 days. Would you like to prepare a WhatsApp reminder?"
     payload = {
-      title: `VeeraGym: Renewal Reminder`,
+      title: 'VeeraGym: Renewal Reminder',
       body: `VeeraGym: ${item.customerName}'s membership renewal is due in ${daysLabel} (${item.renewalDate}). Amount Due: ₹${item.amountDue}. Days Remaining: ${daysLabel}. Would you like to prepare a WhatsApp reminder?`,
       icon: '/icon-192.svg',
       badge: '/badge-72.svg',
@@ -176,20 +193,13 @@ export async function evaluateAndSendRenewalAlerts(): Promise<{
         type: 'single',
       },
       actions: [
-        {
-          action: 'open_and_prepare',
-          title: 'Prepare Reminder',
-        },
-        {
-          action: 'dismiss',
-          title: 'Dismiss',
-        },
+        { action: 'open_and_prepare', title: 'Prepare Reminder' },
+        { action: 'dismiss', title: 'Dismiss' },
       ],
     };
   } else {
-    // If multiple customers have upcoming renewals, display the total number of pending WhatsApp reminders
-    const totalAmount = upcoming.reduce((sum, u) => sum + u.amountDue, 0);
-    const namesSummary = upcoming.slice(0, 3).map((u) => u.customerName).join(', ') +
+    const totalAmount = upcoming.reduce((sum, item) => sum + item.amountDue, 0);
+    const namesSummary = upcoming.slice(0, 3).map((item) => item.customerName).join(', ') +
       (upcoming.length > 3 ? ` and ${upcoming.length - 3} others` : '');
 
     payload = {
@@ -199,44 +209,32 @@ export async function evaluateAndSendRenewalAlerts(): Promise<{
       badge: '/badge-72.svg',
       tag: `renewal-batch-${Date.now()}`,
       data: {
-        url: `/?view=reminders`,
+        url: '/?view=reminders',
         type: 'multiple',
         count: upcoming.length,
         totalAmount,
       },
       actions: [
-        {
-          action: 'open_reminders',
-          title: 'Review All',
-        },
-        {
-          action: 'dismiss',
-          title: 'Dismiss',
-        },
+        { action: 'open_reminders', title: 'Review All' },
+        { action: 'dismiss', title: 'Dismiss' },
       ],
     };
   }
 
-  // Broadcast to all registered gym devices
- const result = await broadcastPush(payload);
-const fcmResult = await broadcastFCM(payload);
+  const result = await broadcastPush(payload);
+  const fcmResult = await broadcastFCM(payload);
+  const deliverySucceeded = result.sent > 0 || fcmResult.sent > 0;
 
-const deliverySucceeded =
-  result.sent > 0 || fcmResult.sent > 0;
-
-if (deliverySucceeded) {
-  for (const item of upcoming) {
-    db.markRenewalNotificationSent(
-      item.customerId,
-      item.renewalDate
-    );
+  if (deliverySucceeded) {
+    for (const item of upcoming) {
+      await db.markRenewalNotificationSent(item.customerId, item.renewalDate);
+    }
   }
-}
 
-return {
-  triggered: true,
-  count: upcoming.length,
-  message: `Push alert sent: Web ${result.sent}/${result.total}, Android ${fcmResult.sent}/${fcmResult.total}, for ${upcoming.length} upcoming renewal(s).`,
-  payload,
-};
+  return {
+    triggered: true,
+    count: upcoming.length,
+    message: `Push alert sent: Web ${result.sent}/${result.total}, Android ${fcmResult.sent}/${fcmResult.total}, for ${upcoming.length} upcoming renewal(s).`,
+    payload,
+  };
 }
