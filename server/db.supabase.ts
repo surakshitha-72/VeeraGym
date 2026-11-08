@@ -1,5 +1,5 @@
 import { supabase } from './supabase.ts';
-import {
+import type {
   Customer,
   CustomerCategory,
   CustomerMonthOverride,

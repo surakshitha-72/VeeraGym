@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { Customer, CustomerCategory, CustomerMonthOverride, DashboardStats, MonthRegisterRow, PaymentRecord, RenewalReminder, StoredPushSubscription } from '../src/types.ts';
+import type { Customer, CustomerCategory, CustomerMonthOverride, DashboardStats, MonthRegisterRow, PaymentRecord, RenewalReminder, StoredPushSubscription } from '../src/types.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'gym_database.json');

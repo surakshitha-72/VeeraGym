@@ -1,7 +1,7 @@
 import webpush from 'web-push';
 import { db } from './db.supabase.ts';
 import { firebaseMessaging } from './firebaseAdmin.ts';
-import { PushNotificationPayload, StoredPushSubscription } from '../src/types.ts';
+import type { PushNotificationPayload, StoredPushSubscription } from '../src/types.ts';
 
 // Load VAPID keys lazily from Supabase. Cache the promise so concurrent
 // requests share the same initialization and serverless instances reuse keys.
