@@ -16,6 +16,10 @@ import {
 dotenv.config();
 
 const app = express();
+// Serve the React frontend when someone opens the homepage on Vercel.
+app.get('/', (req, res) => {
+  res.redirect(302, `/index.html${req.url.slice(1)}`);
+});
 const port = Number(process.env.PORT) || 3000;
 
 // Allow JSON request bodies
