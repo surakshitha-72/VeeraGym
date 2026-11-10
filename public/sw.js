@@ -29,7 +29,7 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'VeeraGym: Renewal Reminder';
   const options = {
     body: data.body || 'Upcoming membership renewal requires attention.',
-    icon: data.icon || '/icon-192.svg',
+    icon: data.icon || '/icon-192.png',
     badge: data.badge || '/badge-72.svg',
     tag: data.tag || 'veeragym-renewal-alert',
     renotify: true,
