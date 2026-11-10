@@ -1,3 +1,4 @@
+
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "express",
@@ -5,5 +6,11 @@
     "server.ts": {
       "includeFiles": "server/**"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/push/cron-renewals",
+      "schedule": "30 2 * * *"
+    }
+  ]
 }

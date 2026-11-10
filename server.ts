@@ -16,10 +16,6 @@ import {
 dotenv.config();
 
 const app = express();
-// Serve the React frontend when someone opens the homepage on Vercel.
-app.get('/', (req, res) => {
-  res.redirect(302, `/index.html${req.url.slice(1)}`);
-});
 const port = Number(process.env.PORT) || 3000;
 
 // Allow JSON request bodies
@@ -29,12 +25,16 @@ app.post('/api/auth/login', adminLogin);
 
 // Protect all API endpoints except login and the public VAPID key
 app.use('/api', (req, res, next) => {
-  if (req.path === '/push/vapid-public-key') {
+  if (
+    req.path === '/push/vapid-public-key' ||
+    req.path === '/push/cron-renewals'
+  ) {
     return next();
   }
 
   requireAdmin(req, res, next);
 });
+
 
 // Server-side Gemini Client
 const ai = new GoogleGenAI({
@@ -576,6 +576,41 @@ app.post('/api/push/check-and-notify', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.get('/api/push/cron-renewals', async (req, res) => {
+  try {
+    const cronSecret = process.env.CRON_SECRET;
+
+    if (!cronSecret) {
+      return res.status(500).json({
+        success: false,
+        message: 'CRON_SECRET is not configured',
+      });
+    }
+
+    if (req.headers.authorization !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized',
+      });
+    }
+
+    const outcome = await evaluateAndSendRenewalAlerts();
+
+    return res.json({
+      success: true,
+      ...outcome,
+    });
+  } catch (error: any) {
+    console.error('[VeeraGym Cron] Renewal notification failed:', error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Renewal notification failed',
+    });
+  }
+});
+
 async function startServer() {
   try {
     if (process.env.NODE_ENV === 'production') {
@@ -624,10 +659,5 @@ async function startServer() {
   }
 }
 
-// Start the server locally, but let Vercel manage it in production.
-if (!process.env.VERCEL) {
-  startServer();
-}
 
-// Export the Express app for Vercel.
-export default app;
+
