@@ -10,9 +10,9 @@ import {
 
 
 // Backend URL
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ??
-  (import.meta.env.PROD ? '' : 'http://192.168.0.108:3000');
+const API_BASE_URL = import.meta.env.PROD
+  ? ''
+  : (import.meta.env.VITE_API_BASE_URL || 'http://192.168.0.108:3000');
 // ADMIN AUTHENTICATION
 const AUTH_TOKEN_KEY = 'veeragym_admin_token';
 
