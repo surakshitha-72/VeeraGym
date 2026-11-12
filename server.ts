@@ -610,16 +610,29 @@ app.get('/api/push/cron-renewals', async (req, res) => {
     });
   }
 });
+// Serve the production frontend in Vercel and local production mode.
+if (
+  process.env.VERCEL ||
+  process.env.NODE_ENV === 'production'
+) {
+  const distPath = path.resolve(process.cwd(), 'dist');
+
+  app.use(express.static(distPath));
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) {
+      return next();
+    }
+
+    res.sendFile(path.join(distPath, 'index.html'), (error) => {
+      if (error) next(error);
+    });
+  });
+}
 
 async function startServer() {
   try {
-    if (process.env.NODE_ENV === 'production') {
-      app.use(express.static(path.resolve(process.cwd(), 'dist')));
-
-      app.get('*', async (req, res) => {
-        res.sendFile(path.resolve(process.cwd(), 'dist', 'index.html'));
-      });
-    } else {
+    if (process.env.NODE_ENV !== 'production') {
       const { createServer } = await import('vite');
 
       const vite = await createServer({
@@ -630,9 +643,7 @@ async function startServer() {
       app.use(vite.middlewares);
     }
 
-    // IMPORTANT:
-    // Listen on all network interfaces so your Android phone
-    // can access this backend through your laptop's Wi-Fi IP.
+    // Listen on all network interfaces for Android testing.
     const server = app.listen(port, '0.0.0.0', () => {
       console.log('--------------------------------------');
       console.log('       VeeraGym Backend Started       ');
@@ -658,15 +669,8 @@ async function startServer() {
     process.exit(1);
   }
 }
-
-
- 
-// Start the server locally, but let Vercel manage it in production.
 if (!process.env.VERCEL) {
   startServer();
 }
 
-// Export the Express app for Vercel.
 export default app;
-
-
