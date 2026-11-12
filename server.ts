@@ -660,4 +660,13 @@ async function startServer() {
 }
 
 
+ 
+// Start the server locally, but let Vercel manage it in production.
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+// Export the Express app for Vercel.
+export default app;
+
 
